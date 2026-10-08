@@ -24,10 +24,10 @@ jobs:
       - run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
-      - run: cp build/pitv pitv-${{ matrix.arch }}
+      - run: cp build/steampi-cec steampi-cec-${{ matrix.arch }}
       - uses: actions/upload-artifact@v7
         with:
-          path: pitv-${{ matrix.arch }}
+          path: steampi-cec-${{ matrix.arch }}
           archive: false
       - name: Publish to rolling release
         if: github.ref == 'refs/heads/main'
@@ -39,4 +39,4 @@ jobs:
             || gh release create nightly --repo "${{ github.repository }}" \
                  --title "Nightly" --notes "Latest build" --prerelease \
             || true
-          gh release upload nightly pitv-${{ matrix.arch }} --clobber --repo "${{ github.repository }}"
+          gh release upload nightly steampi-cec-${{ matrix.arch }} --clobber --repo "${{ github.repository }}"
