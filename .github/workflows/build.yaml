@@ -24,7 +24,7 @@ jobs:
       - run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
-      - run: cp build/steampi-cec steampi-cec-${{ matrix.arch }}
+      - run: cp build/steampi_cec steampi-cec-${{ matrix.arch }}
       - uses: actions/upload-artifact@v7
         with:
           path: steampi-cec-${{ matrix.arch }}
