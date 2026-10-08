@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - run: apt-get update && apt-get install -y g++ cmake ninja-build pkg-config libcec-dev
+      - run: apt-get update && apt-get install -y g++ cmake ninja-build pkg-config libcec-dev libp8-platform-dev libudev-dev
       - run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
