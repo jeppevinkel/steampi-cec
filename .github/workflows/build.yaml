@@ -6,11 +6,15 @@ on:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
+    container: debian:trixie
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-26-04-arm, ubuntu-26-04 ]
-        arch: [arm64, x64]
+        include:
+          - os: ubuntu-26.04-arm
+            arch: arm64
+          - os: ubuntu-26.04
+            arch: x64
 
     steps:
       - uses: actions/checkout@v7
@@ -18,7 +22,8 @@ jobs:
       - run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           cmake --build build
+      - run: cp build/pitv pitv-${{ matrix.arch }}
       - uses: actions/upload-artifact@v7
         with:
-          name: pitv-${{ matrix.arch }}
-          path: build/pitv
+          path: pitv-${{ matrix.arch }}
+          archive: false
