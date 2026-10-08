@@ -1,0 +1,23 @@
+name: Build
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-26-04-arm, ubuntu-26-04 ]
+
+    steps:
+      - uses: actions/checkout@v7
+      - run: apt-get update && apt-get install -y g++ cmake ninja-build libcec-dev
+      - run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pitv-arm64
+          path: build/pitv
