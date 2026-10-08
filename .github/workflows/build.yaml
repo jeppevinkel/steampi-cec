@@ -15,6 +15,8 @@ jobs:
             arch: arm64
           - os: ubuntu-26.04
             arch: x64
+    permissions:
+      contents: write
 
     steps:
       - uses: actions/checkout@v7
@@ -27,3 +29,14 @@ jobs:
         with:
           path: pitv-${{ matrix.arch }}
           archive: false
+      - name: Publish to rolling release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          apt-get install -y gh
+          gh release view nightly --repo "${{ github.repository }}" >/dev/null 2>&1 \
+            || gh release create nightly --repo "${{ github.repository }}" \
+                 --title "Nightly" --notes "Latest build" --prerelease \
+            || true
+          gh release upload nightly pitv-${{ matrix.arch }} --clobber --repo "${{ github.repository }}"
