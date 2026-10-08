@@ -136,6 +136,12 @@ int main() {
     }
     g_log.write(g_running ? "Listen time elapsed" : "Interrupted by signal");
 
+    // ---------- Standby TV ----------
+    if (g_running) {
+        const bool standby = g_adapter->StandbyDevices(CEC::CECDEVICE_TV);
+        g_log.log("Standby TV: {}", standby ? "ok" : "FAILED");
+    }
+
     // ---------- Shutdown ----------
     g_adapter->Close();
     UnloadLibCec(g_adapter);
