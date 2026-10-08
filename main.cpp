@@ -22,6 +22,7 @@ static constexpr auto LISTEN_TIME  = std::chrono::minutes(2);
 static CEC::ICECAdapter* g_adapter = nullptr;
 static std::atomic g_running(true);
 static Logger g_log;
+static std::atomic<bool> g_tvReacted(false);
 
 // ---------- libcec callbacks ----------
 // libcec calls these from its own threads; Logger is internally synchronized.
@@ -39,6 +40,9 @@ static void onCommand(void*, const CEC::cec_command* cmd) {
     switch (cmd->opcode) {
         case CEC::CEC_OPCODE_STANDBY:         g_log.write("  >> STANDBY"); break;
         case CEC::CEC_OPCODE_SET_STREAM_PATH: g_log.write("  >> SET_STREAM_PATH"); break;
+        case CEC::CEC_OPCODE_GIVE_DECK_STATUS:
+            if (cmd->initiator == CEC::CECDEVICE_TV) g_tvReacted = true;
+            break;
         default: break;
     }
 }
@@ -71,6 +75,27 @@ static void uploadLog() {
         std::cout << "\nUpload exited with code " << WEXITSTATUS(status) << std::endl;
     else
         std::cout << "\nUpload terminated abnormally" << std::endl;
+}
+
+static bool grabFocus(const int maxAttempts, const int delay, const int initialDelay = 0) {
+    if (initialDelay > 0) std::this_thread::sleep_for(std::chrono::seconds(initialDelay));
+
+    for (int attempt = 1; attempt <= maxAttempts && g_running; ++attempt) {
+        g_tvReacted = false;  // reset right before sending
+        const bool sent = g_adapter->SetActiveSource(CEC::CEC_DEVICE_TYPE_PLAYBACK_DEVICE);
+
+        // give the TV up to 2 s to react
+        for (int i = 0; i < 10 && !g_tvReacted && g_running; ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        g_log.log("Active source attempt {}: sent={}, TV reacted={}",
+                  attempt, sent, g_tvReacted.load());
+        if (g_tvReacted) return true;
+
+        if (attempt < maxAttempts)
+            std::this_thread::sleep_for(std::chrono::seconds(delay));
+    }
+    return false;
 }
 
 int main() {
@@ -119,14 +144,20 @@ int main() {
     std::signal(SIGTERM, signalHandler);
 
     // ---------- Wake TV and grab focus ----------
+
+    // Must be read BEFORE PowerOnDevices: afterwards libcec marks the TV
+    // as "in transition" and the value tells you nothing.
+    const auto tvPower = g_adapter->GetDevicePowerStatus(CEC::CECDEVICE_TV);
+    g_log.log("TV power status before wake: {}", g_adapter->ToString(tvPower));
+
     const bool powered = g_adapter->PowerOnDevices(CEC::CECDEVICE_TV);
     g_log.log("Power on TV: {}", powered ? "ok" : "FAILED");
 
-    // TVs can take a few seconds to wake; Active Source sent too early may be ignored
-    std::this_thread::sleep_for(std::chrono::seconds(3));
-
-    const bool active = g_adapter->SetActiveSource(CEC::CEC_DEVICE_TYPE_PLAYBACK_DEVICE);
-    g_log.log("Set active source: {}", active ? "ok" : "FAILED");
+    // TV already on: grab focus immediately.
+    // Standby, in transition, or unknown (no reply): give it time to boot first.
+    const int initialDelay = (tvPower == CEC::CEC_POWER_STATUS_ON) ? 0 : 3;
+    if (!grabFocus(3, 1, initialDelay))
+        g_log.write("TV never reacted to Active Source");
 
     // ---------- Listen ----------
     g_log.write("Listening...");
