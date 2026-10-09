@@ -1,19 +1,34 @@
 #!/usr/bin/env bash
 # Fetches the latest deploy/ folder from GitHub and runs the install script from it.
-# The install script also updates the CEC daemon.
-set -euo pipefail
+# The install script also updates the CEC daemon. The full output is sent to ntfy.
+set -uo pipefail
 
 readonly REPOSITORY_ARCHIVE_URL="https://github.com/jeppevinkel/steampi-cec/archive/refs/heads/main.tar.gz"
+readonly NTFY_URL="https://ntfy.sh/pitv-cec-jeppe"
 
 if [[ ${EUID} -ne 0 ]]; then
     exec sudo bash "$0" "$@"
 fi
 
-working_directory="$(mktemp -d)"
-trap 'rm -rf "${working_directory}"' EXIT
+run_update() {
+    set -euo pipefail
+    local working_directory
+    working_directory="$(mktemp -d)"
+    trap 'rm -rf "${working_directory}"' EXIT
 
-echo "Downloading deploy files..."
-curl --fail --location --silent --show-error --retry 3 "${REPOSITORY_ARCHIVE_URL}" \
-    | tar -xz -C "${working_directory}" --strip-components=1 --wildcards '*/deploy/*'
+    echo "Downloading deploy files..."
+    curl --fail --location --silent --show-error --retry 3 "${REPOSITORY_ARCHIVE_URL}" \
+        | tar -xz -C "${working_directory}" --strip-components=1 --wildcards '*/deploy/*'
 
-bash "${working_directory}/deploy/install-steampi.sh"
+    bash "${working_directory}/deploy/install-steampi.sh"
+}
+
+update_log="$(mktemp)"
+run_update 2>&1 | tee "${update_log}"
+update_status=${PIPESTATUS[0]}
+
+echo "Exit status: ${update_status}" >> "${update_log}"
+curl --silent --show-error -T "${update_log}" \
+     -H "Filename: update-$(date +%Y%m%d-%H%M%S).txt" "${NTFY_URL}" > /dev/null
+rm -f "${update_log}"
+exit "${update_status}"
