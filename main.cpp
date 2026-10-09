@@ -36,7 +36,7 @@ static constexpr auto LOG_UPLOAD_INTERVAL = std::chrono::seconds(60);
 static constexpr int MAXIMUM_ADAPTERS = 4;
 static constexpr int MAXIMUM_EVENTS_PER_WAIT = 8;
 static constexpr int VIRTUAL_KEYBOARD_KEY_CODES[] = {
-    KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_ENTER, KEY_BACKSPACE,
+    KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_ENTER, KEY_BACKSPACE, KEY_HOME,
 };
 
 // Shared with libcec callback threads.
@@ -124,6 +124,7 @@ static int linuxKeyForCecKey(const CEC::cec_user_control_code cecKey) {
         case CEC::CEC_USER_CONTROL_CODE_RIGHT:  return KEY_RIGHT;
         case CEC::CEC_USER_CONTROL_CODE_SELECT: return KEY_ENTER;
         case CEC::CEC_USER_CONTROL_CODE_EXIT:   return KEY_BACKSPACE;
+        case CEC::CEC_USER_CONTROL_CODE_CLEAR:  return KEY_HOME;
         default:                                return KEY_RESERVED;
     }
 }
