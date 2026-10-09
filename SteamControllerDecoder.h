@@ -45,6 +45,9 @@ public:
     // Forget the held state, e.g. after the controller was handed to an app and back.
     void reset() { pressedButtons_ = 0; }
 
+    // Buttons held as of the last decoded report.
+    ControllerButtonSet pressedButtons() const { return pressedButtons_; }
+
 private:
     ControllerButtonSet pressedButtons_ = 0;
 };

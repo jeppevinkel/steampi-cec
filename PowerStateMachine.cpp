@@ -6,6 +6,7 @@
 
 #include <sys/timerfd.h>
 
+// TODO: switch to armTimer/disarmTimer from Timers.h so there's only one copy.
 namespace {
 
 // delay must be > 0: an all-zero it_value disarms the timer instead of firing it.

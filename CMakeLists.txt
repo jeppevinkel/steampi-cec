@@ -22,7 +22,13 @@ add_executable(steampi_cec main.cpp
         SteamControllerDecoder.cpp
         SteamControllerDecoder.h
         VirtualKeyboard.cpp
-        VirtualKeyboard.h)
+        VirtualKeyboard.h
+        EventLoop.h
+        Timers.h
+        SteamControllerPuck.cpp
+        SteamControllerPuck.h
+        ControllerNavigation.cpp
+        ControllerNavigation.h)
 
 target_compile_options(steampi_cec PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(steampi_cec PRIVATE PkgConfig::LIBCEC)

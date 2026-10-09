@@ -16,15 +16,20 @@
 #include <unistd.h>
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <system_error>
+#include <span>
 #include <linux/input-event-codes.h>
 
 #include "CecEventQueue.h"
+#include "ControllerNavigation.h"
+#include "EventLoop.h"
 #include "FileDescriptor.h"
 #include "Logger.h"
 #include "LogUploader.h"
 #include "PhysicalAddress.h"
 #include "PowerStateMachine.h"
+#include "SteamControllerPuck.h"
 #include "VirtualKeyboard.h"
 
 static constexpr auto DEVICE_NAME = "PiTV";
@@ -144,13 +149,6 @@ static void onKeyPress(void*, const CEC::cec_keypress* keyPress) {
 }
 
 // ---------- helpers ----------
-
-static bool watchForInput(const int epollFileDescriptor, const int watchedFileDescriptor) {
-    epoll_event interest{};
-    interest.events = EPOLLIN;
-    interest.data.fd = watchedFileDescriptor;
-    return epoll_ctl(epollFileDescriptor, EPOLL_CTL_ADD, watchedFileDescriptor, &interest) == 0;
-}
 
 static void armRepeatingTimer(const int timerFileDescriptor,
                               const std::chrono::seconds firstDelay,
@@ -295,63 +293,92 @@ int main() {
                                         unattendedAppTimerFileDescriptor.get(), g_log);
     powerStateMachine.requestWake();
 
+    // Controller support is optional: if it can't be set up, CEC and the TV remote keep working.
+    std::optional<ControllerNavigation> controllerNavigation;
+    std::optional<SteamControllerPuck> steamControllerPuck;
+    try {
+        controllerNavigation.emplace(epollFileDescriptor.get(), powerStateMachine,
+                                     g_virtualKeyboard.get(), g_log);
+        steamControllerPuck.emplace(epollFileDescriptor.get(), g_log,
+            [&controllerNavigation](const std::span<const uint8_t> report) {
+                controllerNavigation->onReport(report);
+            });
+    } catch (const std::system_error& error) {
+        g_log.log("Controller support disabled: {}", error.what());
+        steamControllerPuck.reset();
+        controllerNavigation.reset();
+    }
+
     // 6. Event loop: sleeps in the kernel until something is ready.
-    bool running = true;
-    while (running) {
-        epoll_event readyEvents[MAXIMUM_EVENTS_PER_WAIT];
-        const int readyCount = epoll_wait(epollFileDescriptor.get(), readyEvents,
-                                          MAXIMUM_EVENTS_PER_WAIT, -1);
-        if (readyCount < 0) {
-            if (errno == EINTR) continue;
-            g_log.log("epoll_wait failed: {}", std::strerror(errno));
-            break;
-        }
+    int exitCode = 0;
+    try {
+        bool running = true;
+        while (running) {
+            epoll_event readyEvents[MAXIMUM_EVENTS_PER_WAIT];
+            const int readyCount = epoll_wait(epollFileDescriptor.get(), readyEvents,
+                                              MAXIMUM_EVENTS_PER_WAIT, -1);
+            if (readyCount < 0) {
+                if (errno == EINTR) continue;
+                g_log.log("epoll_wait failed: {}", std::strerror(errno));
+                exitCode = 7;   // non-zero, so systemd restarts the daemon
+                break;
+            }
 
-        for (int readyIndex = 0; readyIndex < readyCount; ++readyIndex) {
-            const int readyFileDescriptor = readyEvents[readyIndex].data.fd;
+            for (int readyIndex = 0; readyIndex < readyCount; ++readyIndex) {
+                const int readyFileDescriptor = readyEvents[readyIndex].data.fd;
 
-            if (readyFileDescriptor == signalFileDescriptor.get()) {
-                signalfd_siginfo signalInformation{};
-                [[maybe_unused]] const auto bytesRead =
-                    read(readyFileDescriptor, &signalInformation, sizeof signalInformation);
-                g_log.log("Received signal {}, shutting down", signalInformation.ssi_signo);
-                running = false;
+                if (readyFileDescriptor == signalFileDescriptor.get()) {
+                    signalfd_siginfo signalInformation{};
+                    [[maybe_unused]] const auto bytesRead =
+                        read(readyFileDescriptor, &signalInformation, sizeof signalInformation);
+                    g_log.log("Received signal {}, shutting down", signalInformation.ssi_signo);
+                    running = false;
 
-            } else if (readyFileDescriptor == wakeTimerFileDescriptor.get()) {
-                std::uint64_t expirationCount = 0;
-                const auto bytesRead =
-                    read(readyFileDescriptor, &expirationCount, sizeof expirationCount);
-                // EAGAIN here means the timer was disarmed earlier in this batch.
-                if (bytesRead == sizeof expirationCount) {
-                    powerStateMachine.onWakeTimerExpired();
-                }
+                } else if (readyFileDescriptor == wakeTimerFileDescriptor.get()) {
+                    std::uint64_t expirationCount = 0;
+                    const auto bytesRead =
+                        read(readyFileDescriptor, &expirationCount, sizeof expirationCount);
+                    // EAGAIN here means the timer was disarmed earlier in this batch.
+                    if (bytesRead == sizeof expirationCount) {
+                        powerStateMachine.onWakeTimerExpired();
+                    }
 
-            } else if (readyFileDescriptor == unattendedAppTimerFileDescriptor.get()) {
-                std::uint64_t expirationCount = 0;
-                const auto bytesRead =
-                    read(readyFileDescriptor, &expirationCount, sizeof expirationCount);
-                // EAGAIN means it was disarmed earlier in this batch (the user came back).
-                if (bytesRead == sizeof expirationCount) {
-                    powerStateMachine.onUnattendedAppTimerExpired();
-                }
+                } else if (readyFileDescriptor == unattendedAppTimerFileDescriptor.get()) {
+                    std::uint64_t expirationCount = 0;
+                    const auto bytesRead =
+                        read(readyFileDescriptor, &expirationCount, sizeof expirationCount);
+                    // EAGAIN means it was disarmed earlier in this batch (the user came back).
+                    if (bytesRead == sizeof expirationCount) {
+                        powerStateMachine.onUnattendedAppTimerExpired();
+                    }
 
-            } else if (readyFileDescriptor == uploadTimerFileDescriptor.get()) {
-                std::uint64_t expirationCount = 0;
-                [[maybe_unused]] const auto bytesRead =
-                    read(readyFileDescriptor, &expirationCount, sizeof expirationCount);
-                uploadNewLogContent(logUploader);
+                } else if (readyFileDescriptor == uploadTimerFileDescriptor.get()) {
+                    std::uint64_t expirationCount = 0;
+                    [[maybe_unused]] const auto bytesRead =
+                        read(readyFileDescriptor, &expirationCount, sizeof expirationCount);
+                    uploadNewLogContent(logUploader);
 
-            } else if (readyFileDescriptor == g_cecEventQueue.notificationFileDescriptor()) {
-                for (const CecEvent event : g_cecEventQueue.takeAll()) {
-                    powerStateMachine.onCecEvent(event);   // main thread: safe to call libcec
+                } else if (readyFileDescriptor == g_cecEventQueue.notificationFileDescriptor()) {
+                    for (const CecEvent event : g_cecEventQueue.takeAll()) {
+                        powerStateMachine.onCecEvent(event);   // main thread: safe to call libcec
+                    }
+                } else if (steamControllerPuck
+                           && steamControllerPuck->handleReadyFileDescriptor(readyFileDescriptor)) {
+                    // Controller reports, or a rescan for the puck: handled inside.
+                } else if (controllerNavigation
+                           && controllerNavigation->handleReadyFileDescriptor(readyFileDescriptor)) {
+                    // Key repeat for a held direction: handled inside.
                 }
             }
         }
+    } catch (const std::exception& error) {
+        g_log.log("Unexpected error, shutting down: {}", error.what());
+        exitCode = 6;   // non-zero, so systemd restarts the daemon
     }
 
     // 7. Shutdown. The TV is deliberately left alone: restarts shouldn't blank the screen.
     closeCecAdapter();
     g_virtualKeyboard.reset();
     closeLogAndUploadRemainder(logUploader);
-    return 0;
+    return exitCode;
 }
