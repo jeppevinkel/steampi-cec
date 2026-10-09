@@ -18,7 +18,9 @@ add_executable(steampi_cec main.cpp
         PowerStateMachine.cpp
         PowerStateMachine.h
         LogUploader.cpp
-        LogUploader.h)
+        LogUploader.h
+        SteamControllerDecoder.cpp
+        SteamControllerDecoder.h)
 
 target_compile_options(steampi_cec PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(steampi_cec PRIVATE PkgConfig::LIBCEC)
