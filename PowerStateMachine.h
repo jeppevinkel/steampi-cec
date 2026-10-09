@@ -25,8 +25,9 @@ public:
 private:
     void enterActive();
     void enterStandby(bool sendStandbyToTv);
-    void armWakeTimer(std::chrono::milliseconds delay) const;   // delay must be > 0
-    void disarmWakeTimer() const;
+    void armWakeTimer(std::chrono::milliseconds delay);   // delay must be > 0
+    void disarmWakeTimer();
+    void beginWaking(const char* reason);
 
     // My Samsung takes ~2.1 s from Image View On to 'on'.
     static constexpr auto TV_BOOT_DELAY = std::chrono::milliseconds(3000);
@@ -38,4 +39,5 @@ private:
     Logger& log_;
     PowerState state_ = PowerState::Standby;
     int activeSourceAttempts_ = 0;
+    bool tvShowingOurInput_ = false;
 };

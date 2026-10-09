@@ -12,15 +12,22 @@ PowerStateMachine::PowerStateMachine(CEC::ICECAdapter* adapter,
     : adapter_(adapter), wakeTimerFileDescriptor_(wakeTimerFileDescriptor), log_(log) {}
 
 void PowerStateMachine::requestWake() {
-    if (state_ != PowerState::Standby) return;
+    if (state_ == PowerState::Waking) return;
+
+    if (state_ == PowerState::Active) {
+        // Either the TV is on another input, or we believe we're on screen. Taking the source
+        // again is harmless if we are, and recovers if our state is stale (e.g. the TV lost
+        // power and never sent Standby). SetActiveSource also sends Image View On, and the
+        // retries cover a TV that still has to boot.
+        beginWaking(tvShowingOurInput_ ? "taking the source again" : "taking the TV back");
+        onWakeTimerExpired();
+        return;
+    }
 
     // Must be read BEFORE PowerOnDevices: afterwards libcec reports 'in transition'.
     const auto tvPowerStatus = adapter_->GetDevicePowerStatus(CEC::CECDEVICE_TV);
     log_.log("TV power status before wake: {}", adapter_->ToString(tvPowerStatus));
-
-    state_ = PowerState::Waking;
-    activeSourceAttempts_ = 0;
-    log_.write("State: Waking");
+    beginWaking("from standby");
 
     if (tvPowerStatus == CEC::CEC_POWER_STATUS_ON) {
         // SetActiveSource sends Image View On itself; no separate power-on needed.
@@ -31,6 +38,12 @@ void PowerStateMachine::requestWake() {
     const bool poweredOn = adapter_->PowerOnDevices(CEC::CECDEVICE_TV);
     log_.log("Power on TV: {}", poweredOn ? "ok" : "FAILED");
     armWakeTimer(TV_BOOT_DELAY);
+}
+
+void PowerStateMachine::beginWaking(const char* reason) {
+    state_ = PowerState::Waking;
+    activeSourceAttempts_ = 0;
+    log_.log("State: Waking ({})", reason);
 }
 
 void PowerStateMachine::requestStandby() {
@@ -68,15 +81,17 @@ void PowerStateMachine::onCecEvent(const CecEvent event) {
             break;
 
         case CecEvent::SelectedUs:
-            // From Standby: the user picked "PiTV" in the TV's source menu.
+            // The TV picked our input: from its source menu, or on power-up if it was last on us.
+            tvShowingOurInput_ = true;
             if (state_ != PowerState::Active) enterActive();
             break;
 
         case CecEvent::SelectedOther:
             // Ignored while Waking: that's the Samsung's boot routing noise.
             if (state_ == PowerState::Active) {
+                tvShowingOurInput_ = false;
                 log_.write("TV switched to another source");
-                // Decide later: stop streaming, or treat as standby.
+                // TODO: stop streaming, or treat as standby.
             }
             break;
     }
@@ -84,9 +99,10 @@ void PowerStateMachine::onCecEvent(const CecEvent event) {
 
 void PowerStateMachine::enterActive() {
     disarmWakeTimer();
+    tvShowingOurInput_ = true;   // every way into Active means the TV shows us (or is assumed to)
     state_ = PowerState::Active;
     log_.write("State: Active");
-    // Later: launch Flex Launcher.
+    // TODO: launch Flex Launcher.
 }
 
 void PowerStateMachine::enterStandby(const bool sendStandbyToTv) {
@@ -95,19 +111,20 @@ void PowerStateMachine::enterStandby(const bool sendStandbyToTv) {
         const bool standbySent = adapter_->StandbyDevices(CEC::CECDEVICE_TV);
         log_.log("Standby TV: {}", standbySent ? "ok" : "FAILED");
     }
+    tvShowingOurInput_ = false;
     state_ = PowerState::Standby;
     log_.write("State: Standby");
-    // Later: stop apps and Flex Launcher.
+    // TODO: stop apps and Flex Launcher.
 }
 
-void PowerStateMachine::armWakeTimer(const std::chrono::milliseconds delay) const {
+void PowerStateMachine::armWakeTimer(const std::chrono::milliseconds delay) {
     itimerspec timerSpecification{};               // zero it_interval = one-shot
     timerSpecification.it_value.tv_sec  = delay.count() / 1000;
     timerSpecification.it_value.tv_nsec = (delay.count() % 1000) * 1'000'000;
     timerfd_settime(wakeTimerFileDescriptor_, 0, &timerSpecification, nullptr);
 }
 
-void PowerStateMachine::disarmWakeTimer() const {
+void PowerStateMachine::disarmWakeTimer() {
     constexpr itimerspec zeroSpecification{};          // all-zero it_value disarms
     timerfd_settime(wakeTimerFileDescriptor_, 0, &zeroSpecification, nullptr);
 }
