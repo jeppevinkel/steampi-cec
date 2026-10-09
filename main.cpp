@@ -15,6 +15,9 @@
 #include <sys/timerfd.h>
 #include <unistd.h>
 #include <chrono>
+#include <memory>
+#include <system_error>
+#include <linux/input-event-codes.h>
 
 #include "CecEventQueue.h"
 #include "FileDescriptor.h"
@@ -22,6 +25,7 @@
 #include "LogUploader.h"
 #include "PhysicalAddress.h"
 #include "PowerStateMachine.h"
+#include "VirtualKeyboard.h"
 
 static constexpr auto DEVICE_NAME = "PiTV";
 static constexpr auto LOG_PATH     = "/home/jeppe/cec.log";
@@ -31,12 +35,17 @@ static constexpr auto FIRST_LOG_UPLOAD_DELAY = std::chrono::seconds(10);
 static constexpr auto LOG_UPLOAD_INTERVAL = std::chrono::seconds(60);
 static constexpr int MAXIMUM_ADAPTERS = 4;
 static constexpr int MAXIMUM_EVENTS_PER_WAIT = 8;
+static constexpr int VIRTUAL_KEYBOARD_KEY_CODES[] = {
+    KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_ENTER, KEY_BACKSPACE,
+};
 
 // Shared with libcec callback threads.
 static CEC::ICECAdapter* g_adapter = nullptr;
 static Logger g_log;                       // internally synchronized
 static CecEventQueue g_cecEventQueue;
 static std::atomic<uint16_t> g_ownPhysicalAddress{CEC_INVALID_PHYSICAL_ADDRESS};
+// Created before libcec starts and reset after it's closed, so libcec's thread can always use it.
+static std::unique_ptr<VirtualKeyboard> g_virtualKeyboard;
 
 // ---------- libcec callbacks ----------
 // These run on libcec's threads: log and push events only, never call libcec commands.
@@ -105,6 +114,32 @@ static void onLog(void*, const CEC::cec_log_message* logMessage) {
         default: break;
     }
     g_log.log("[libcec {}] {}", levelName, logMessage->message);
+}
+
+static int linuxKeyForCecKey(const CEC::cec_user_control_code cecKey) {
+    switch (cecKey) {
+        case CEC::CEC_USER_CONTROL_CODE_UP:     return KEY_UP;
+        case CEC::CEC_USER_CONTROL_CODE_DOWN:   return KEY_DOWN;
+        case CEC::CEC_USER_CONTROL_CODE_LEFT:   return KEY_LEFT;
+        case CEC::CEC_USER_CONTROL_CODE_RIGHT:  return KEY_RIGHT;
+        case CEC::CEC_USER_CONTROL_CODE_SELECT: return KEY_ENTER;
+        case CEC::CEC_USER_CONTROL_CODE_EXIT:   return KEY_BACKSPACE;
+        default:                                return KEY_RESERVED;
+    }
+}
+
+// Runs on libcec's thread. Writing to uinput is not a libcec call, so it can't block libcec.
+static void onKeyPress(void*, const CEC::cec_keypress* keyPress) {
+    // libcec reports each key twice: on press (duration 0) and on release (how long it was held).
+    if (keyPress->duration != 0) return;
+
+    const int linuxKeyCode = linuxKeyForCecKey(keyPress->keycode);
+    g_log.log("Remote key: {} -> {}", g_adapter->ToString(keyPress->keycode),
+              linuxKeyCode == KEY_RESERVED ? std::string("unmapped") : std::to_string(linuxKeyCode));
+
+    if (linuxKeyCode != KEY_RESERVED && g_virtualKeyboard) {
+        g_virtualKeyboard->tap(linuxKeyCode);
+    }
 }
 
 // ---------- helpers ----------
@@ -190,11 +225,19 @@ int main() {
         return 4;
     }
 
+    try {
+        g_virtualKeyboard = std::make_unique<VirtualKeyboard>(VIRTUAL_KEYBOARD_KEY_CODES);
+        g_log.write("Virtual keyboard created");
+    } catch (const std::system_error& error) {
+        g_log.log("Virtual keyboard disabled: {}", error.what());
+    }
+
     // 3. libcec. Callbacks and configuration must outlive the adapter (they do: main's scope).
     CEC::ICECCallbacks callbacks;
     callbacks.Clear();
     callbacks.commandReceived = &onCommand;
     callbacks.logMessage = &onLog;
+    callbacks.keyPress = &onKeyPress;
 
     CEC::libcec_configuration configuration;
     configuration.Clear();
@@ -240,6 +283,7 @@ int main() {
         || !watchForInput(epollFileDescriptor.get(), g_cecEventQueue.notificationFileDescriptor())) {
         g_log.log("epoll_ctl failed: {}", std::strerror(errno));
         closeCecAdapter();
+        g_virtualKeyboard.reset();
         closeLogAndUploadRemainder(logUploader);
         return 5;
     }
@@ -306,6 +350,7 @@ int main() {
 
     // 7. Shutdown. The TV is deliberately left alone: restarts shouldn't blank the screen.
     closeCecAdapter();
+    g_virtualKeyboard.reset();
     closeLogAndUploadRemainder(logUploader);
     return 0;
 }

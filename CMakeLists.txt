@@ -20,7 +20,9 @@ add_executable(steampi_cec main.cpp
         LogUploader.cpp
         LogUploader.h
         SteamControllerDecoder.cpp
-        SteamControllerDecoder.h)
+        SteamControllerDecoder.h
+        VirtualKeyboard.cpp
+        VirtualKeyboard.h)
 
 target_compile_options(steampi_cec PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(steampi_cec PRIVATE PkgConfig::LIBCEC)
