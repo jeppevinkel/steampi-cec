@@ -280,11 +280,11 @@ updated_kernel_arguments=()
 for kernel_argument in "${original_kernel_arguments[@]}"; do
     case "${kernel_argument}" in
         # Dropped, or re-added below with our values.
-        console=tty1 | splash | quiet | logo.nologo | loglevel=* | vt.global_cursor_default=*) ;;
+        console=tty1 | splash | quiet | logo.nologo | loglevel=* | vt.global_cursor_default=* | usbhid.mousepoll=*) ;;
         *) updated_kernel_arguments+=("${kernel_argument}") ;;
     esac
 done
-updated_kernel_arguments+=(quiet loglevel=3 logo.nologo vt.global_cursor_default=0)
+updated_kernel_arguments+=(quiet loglevel=3 logo.nologo vt.global_cursor_default=0 usbhid.mousepoll=2)
 staged_kernel_command_line="${working_directory}/cmdline.txt"
 printf '%s\n' "${updated_kernel_arguments[*]}" > "${staged_kernel_command_line}"
 replace_boot_file "${staged_kernel_command_line}" "${KERNEL_COMMAND_LINE_PATH}"
