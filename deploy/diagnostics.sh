@@ -9,11 +9,8 @@ section "mousepoll"
 echo "current value:  $(cat /sys/module/usbhid/parameters/mousepoll)"
 echo "/proc/cmdline:  $(grep -o 'usbhid[^ ]*' /proc/cmdline || echo none)"
 echo "cmdline.txt:    $(grep -o 'usbhid[^ ]*' /boot/firmware/cmdline.txt || echo none)"
-echo "usbhid built in: $(grep -c usbhid "/lib/modules/$(uname -r)/modules.builtin")"
-echo "modprobe.d options:"
-grep -rs mousepoll /etc/modprobe.d /lib/modprobe.d /usr/lib/modprobe.d || echo "  none"
 
-section "Controller button map (report 0x42)"
+section "Controller: missing buttons and stick values (report 0x42)"
 python3 - <<'EOF'
 import glob
 import os
@@ -22,17 +19,20 @@ import termios
 import time
 
 PUCK_ID = '000028DE:00001304'
-MOUSE_COLLECTION_PREFIX = bytes([0x05, 0x01, 0x09, 0x02])   # slot interfaces start like this
+MOUSE_COLLECTION_PREFIX = bytes([0x05, 0x01, 0x09, 0x02])
 CONTROLLER_REPORT_ID = 0x42
 SETTLE_SECONDS = 1.5
 CAPTURE_SECONDS = 1.5
+BUTTON_BYTES = (2, 3, 4)                  # where the buttons live; bytes 30+ are sensor noise
+STICK_OFFSETS = range(10, 30, 2)          # candidate signed 16-bit little-endian values
 
-BUTTON_NAMES = [
-    'A', 'B', 'X', 'Y',
-    'D-pad up', 'D-pad down', 'D-pad left', 'D-pad right',
-    'Steam button', 'Menu (three lines)', 'View (two squares)',
-    'Left bumper', 'Right bumper',
-    'Left stick pushed fully right', 'Left stick pushed fully up',
+BUTTON_NAMES = ['A', 'Left bumper']
+STICK_POSITIONS = [
+    'Left stick at rest (hands off)',
+    'Left stick pushed fully RIGHT',
+    'Left stick pushed fully LEFT',
+    'Left stick pushed fully UP',
+    'Left stick pushed fully DOWN',
 ]
 
 terminal = open('/dev/tty', 'w')
@@ -65,46 +65,47 @@ def capture_reports(file_descriptors, seconds):
                 controller_reports.append(report)
     return controller_reports
 
-def constant_bits(reports):
-    """{(byte_index, bit_index): value} for every bit that never changes across the reports."""
-    if not reports:
-        return {}
-    report_length = min(len(report) for report in reports)
-    bits = {}
-    for byte_index in range(1, report_length):            # byte 0 is the report ID
-        byte_values = {report[byte_index] for report in reports}
-        for bit_index in range(8):
-            bit_values = {(byte_value >> bit_index) & 1 for byte_value in byte_values}
-            if len(bit_values) == 1:
-                bits[(byte_index, bit_index)] = bit_values.pop()
-    return bits
+def capture_while_held(file_descriptors, instruction):
+    tell_user(f'>>> {instruction} ... ')
+    capture_reports(file_descriptors, SETTLE_SECONDS)       # discards reports from before
+    held_reports = capture_reports(file_descriptors, CAPTURE_SECONDS)
+    tell_user('release.\n')
+    capture_reports(file_descriptors, 1.0)
+    return held_reports
+
+def set_button_bits(reports):
+    """Bits in the button bytes that are 1 in every report."""
+    return {(byte_index, bit_index)
+            for byte_index in BUTTON_BYTES
+            for bit_index in range(8)
+            if reports and all((report[byte_index] >> bit_index) & 1 for report in reports)}
+
+def median_signed_16(reports, offset):
+    values = sorted(int.from_bytes(report[offset:offset + 2], 'little', signed=True) for report in reports)
+    return values[len(values) // 2]
 
 slot_file_descriptors = open_slot_interfaces()
 if not slot_file_descriptors:
     print('No puck slot interfaces found (or permission denied).')
     raise SystemExit
 
-tell_user('>>> Put the controller down and do NOT touch it...\n')
+tell_user('>>> Hands off the buttons (holding the controller is fine)...\n')
 capture_reports(slot_file_descriptors, SETTLE_SECONDS)
-baseline_reports = capture_reports(slot_file_descriptors, 2.0)
-baseline_bits = constant_bits(baseline_reports)
-print(f'Baseline: {len(baseline_reports)} reports, {len(baseline_bits)} stable bits')
+baseline_button_bits = set_button_bits(capture_reports(slot_file_descriptors, 2.0))
 
 for button_name in BUTTON_NAMES:
-    tell_user(f'>>> Press and HOLD: {button_name} ... ')
-    capture_reports(slot_file_descriptors, SETTLE_SECONDS)   # discards reports from before the press
-    held_reports = capture_reports(slot_file_descriptors, CAPTURE_SECONDS)
-    tell_user('release.\n')
-    capture_reports(slot_file_descriptors, 1.0)
+    held_reports = capture_while_held(slot_file_descriptors, f'Press and HOLD: {button_name}')
+    newly_set_bits = sorted(set_button_bits(held_reports) - baseline_button_bits)
+    description = ', '.join(f'byte {byte_index} bit {bit_index}' for byte_index, bit_index in newly_set_bits)
+    print(f'{button_name:32} {description or "no button bit found"}')
 
-    held_bits = constant_bits(held_reports)
-    changed_bits = sorted(position for position, value in held_bits.items()
-                          if position in baseline_bits and baseline_bits[position] != value)
-    description = ', '.join(f'byte {byte_index} bit {bit_index} -> {held_bits[(byte_index, bit_index)]}'
-                            for byte_index, bit_index in changed_bits)
-    print(f'{button_name:32} {description or "no stable change found"}')
+print()
+print(f'{"":32} ' + ' '.join(f'{offset:>7}' for offset in STICK_OFFSETS))
+for position_name in STICK_POSITIONS:
+    held_reports = capture_while_held(slot_file_descriptors, position_name)
+    values = ' '.join(f'{median_signed_16(held_reports, offset):>7}' for offset in STICK_OFFSETS)
+    print(f'{position_name:32} {values}')
 
-# Lizard mode may have typed into this console while buttons were pressed; throw that away.
 with open('/dev/tty') as terminal_input:
     termios.tcflush(terminal_input, termios.TCIFLUSH)
 tell_user('>>> Done, sending...\n')
