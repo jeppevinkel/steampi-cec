@@ -1,183 +1,297 @@
 #include <atomic>
-#include <chrono>
+#include <cerrno>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
+#include <cstring>
 #include <format>
 #include <iostream>
 #include <string>
-#include <thread>
 #include <libcec/cec.h>
 #include <libcec/cecloader.h>
-#include <sys/wait.h>
+#include <pthread.h>
+#include <sys/epoll.h>
+#include <sys/signalfd.h>
+#include <sys/timerfd.h>
+#include <unistd.h>
+#include <chrono>
 
+#include "CecEventQueue.h"
+#include "FileDescriptor.h"
 #include "Logger.h"
+#include "LogUploader.h"
+#include "PhysicalAddress.h"
+#include "PowerStateMachine.h"
 
 static constexpr auto DEVICE_NAME = "PiTV";
 static constexpr auto LOG_PATH     = "/home/jeppe/cec.log";
+static constexpr auto LOG_UPLOAD_CHUNK_PATH = "/home/jeppe/cec-upload-chunk.log";
 static constexpr auto NTFY_TOPIC = "pitv-cec-jeppe";
-static constexpr auto LISTEN_TIME  = std::chrono::minutes(2);
+static constexpr auto FIRST_LOG_UPLOAD_DELAY = std::chrono::seconds(10);
+static constexpr auto LOG_UPLOAD_INTERVAL = std::chrono::seconds(60);
+static constexpr int MAXIMUM_ADAPTERS = 4;
+static constexpr int MAXIMUM_EVENTS_PER_WAIT = 8;
 
+// Shared with libcec callback threads.
 static CEC::ICECAdapter* g_adapter = nullptr;
-static std::atomic g_running(true);
-static Logger g_log;
-static std::atomic<bool> g_tvReacted(false);
+static Logger g_log;                       // internally synchronized
+static CecEventQueue g_cecEventQueue;
+static std::atomic<uint16_t> g_ownPhysicalAddress{CEC_INVALID_PHYSICAL_ADDRESS};
 
 // ---------- libcec callbacks ----------
-// libcec calls these from its own threads; Logger is internally synchronized.
-static void onCommand(void*, const CEC::cec_command* cmd) {
-    std::string params;
-    for (uint8_t i = 0; i < cmd->parameters.size; ++i)
-        params += std::format(" {:02x}", cmd->parameters[i]);
+// These run on libcec's threads: log and push events only, never call libcec commands.
+
+static void pushSelectionEvent(const uint16_t targetAddress) {
+    if (targetAddress == CEC_INVALID_PHYSICAL_ADDRESS) return;   // Samsung sends ffff while booting
+    g_cecEventQueue.push(targetAddress == g_ownPhysicalAddress.load()
+                             ? CecEvent::SelectedUs
+                             : CecEvent::SelectedOther);
+}
+
+static void onCommand(void*, const CEC::cec_command* command) {
+    std::string parametersHex;
+    for (uint8_t parameterIndex = 0; parameterIndex < command->parameters.size; ++parameterIndex) {
+        parametersHex += std::format(" {:02x}", command->parameters[parameterIndex]);
+    }
 
     g_log.log("CMD {} -> {}: {}{}",
-              g_adapter->ToString(cmd->initiator),
-              g_adapter->ToString(cmd->destination),
-              g_adapter->ToString(cmd->opcode),
-              params);
+              g_adapter->ToString(command->initiator),
+              g_adapter->ToString(command->destination),
+              g_adapter->ToString(command->opcode),
+              parametersHex);
 
-    switch (cmd->opcode) {
-        case CEC::CEC_OPCODE_STANDBY:         g_log.write("  >> STANDBY"); break;
-        case CEC::CEC_OPCODE_SET_STREAM_PATH: g_log.write("  >> SET_STREAM_PATH"); break;
-        case CEC::CEC_OPCODE_GIVE_DECK_STATUS:
-            if (cmd->initiator == CEC::CECDEVICE_TV) g_tvReacted = true;
+    const bool fromTv = command->initiator == CEC::CECDEVICE_TV;
+
+    switch (command->opcode) {
+        case CEC::CEC_OPCODE_STANDBY:
+            if (fromTv) g_cecEventQueue.push(CecEvent::TvStandby);
             break;
+
+        case CEC::CEC_OPCODE_GIVE_DECK_STATUS:
+            // My Samsung asks for deck status right after accepting our Active Source.
+            if (fromTv) g_cecEventQueue.push(CecEvent::TvQueriedDeckStatus);
+            break;
+
+        case CEC::CEC_OPCODE_SET_STREAM_PATH:
+            pushSelectionEvent(readPhysicalAddress(command->parameters));
+            break;
+
+        case CEC::CEC_OPCODE_ROUTING_CHANGE:
+            pushSelectionEvent(readPhysicalAddress(command->parameters, 2));
+            break;
+
+        case CEC::CEC_OPCODE_ACTIVE_SOURCE: {
+            // Another device (e.g. Playback 1 on HDMI 2) claimed the TV.
+            const uint16_t sourceAddress = readPhysicalAddress(command->parameters);
+            if (sourceAddress != CEC_INVALID_PHYSICAL_ADDRESS
+                && sourceAddress != g_ownPhysicalAddress.load()) {
+                g_cecEventQueue.push(CecEvent::SelectedOther);
+            }
+            break;
+        }
         default: break;
     }
 }
 
 // libcec's own internal log (very useful for debugging CEC)
-static void onLog(void*, const CEC::cec_log_message* msg) {
-    const char* lvl = "?";
-    switch (msg->level) {
-        case CEC::CEC_LOG_ERROR:   lvl = "ERROR";   break;
-        case CEC::CEC_LOG_WARNING: lvl = "WARNING"; break;
-        case CEC::CEC_LOG_NOTICE:  lvl = "NOTICE";  break;
-        case CEC::CEC_LOG_TRAFFIC: lvl = "TRAFFIC"; break;
-        case CEC::CEC_LOG_DEBUG:   lvl = "DEBUG";   break;
+static void onLog(void*, const CEC::cec_log_message* logMessage) {
+    const char* levelName = "?";
+    switch (logMessage->level) {
+        case CEC::CEC_LOG_ERROR:   levelName = "ERROR";   break;
+        case CEC::CEC_LOG_WARNING: levelName = "WARNING"; break;
+        case CEC::CEC_LOG_NOTICE:  levelName = "NOTICE";  break;
+        case CEC::CEC_LOG_TRAFFIC: levelName = "TRAFFIC"; break;
+        case CEC::CEC_LOG_DEBUG:   levelName = "DEBUG";   break;
         default: break;
     }
-    g_log.log("[libcec {}] {}", lvl, msg->message);
+    g_log.log("[libcec {}] {}", levelName, logMessage->message);
 }
 
-static void signalHandler(int) {
-    g_running.store(false);
+// ---------- helpers ----------
+
+static bool watchForInput(const int epollFileDescriptor, const int watchedFileDescriptor) {
+    epoll_event interest{};
+    interest.events = EPOLLIN;
+    interest.data.fd = watchedFileDescriptor;
+    return epoll_ctl(epollFileDescriptor, EPOLL_CTL_ADD, watchedFileDescriptor, &interest) == 0;
 }
 
-static void uploadLog() {
-    const std::string cmd = std::format(
-        "curl -sS --fail --max-time 30 -T '{0}' -H 'Filename: cec.log' https://ntfy.sh/{1}",
-        LOG_PATH, NTFY_TOPIC);
-
-    const int status = std::system(cmd.c_str());
-    if (WIFEXITED(status))
-        std::cout << "\nUpload exited with code " << WEXITSTATUS(status) << std::endl;
-    else
-        std::cout << "\nUpload terminated abnormally" << std::endl;
+static void armRepeatingTimer(const int timerFileDescriptor,
+                              const std::chrono::seconds firstDelay,
+                              const std::chrono::seconds interval) {
+    itimerspec timerSpecification{};
+    timerSpecification.it_value.tv_sec = firstDelay.count();
+    timerSpecification.it_interval.tv_sec = interval.count();
+    timerfd_settime(timerFileDescriptor, 0, &timerSpecification, nullptr);
 }
 
-static bool grabFocus(const int maxAttempts, const int delay, const int initialDelay = 0) {
-    if (initialDelay > 0) std::this_thread::sleep_for(std::chrono::seconds(initialDelay));
+static void closeCecAdapter() {
+    g_adapter->Close();
+    UnloadLibCec(g_adapter);
+    g_log.write("Adapter closed");
+}
 
-    for (int attempt = 1; attempt <= maxAttempts && g_running; ++attempt) {
-        g_tvReacted = false;  // reset right before sending
-        const bool sent = g_adapter->SetActiveSource(CEC::CEC_DEVICE_TYPE_PLAYBACK_DEVICE);
-
-        // give the TV up to 2 s to react
-        for (int i = 0; i < 10 && !g_tvReacted && g_running; ++i)
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-        g_log.log("Active source attempt {}: sent={}, TV reacted={}",
-                  attempt, sent, g_tvReacted.load());
-        if (g_tvReacted) return true;
-
-        if (attempt < maxAttempts)
-            std::this_thread::sleep_for(std::chrono::seconds(delay));
+// Successful uploads are deliberately NOT logged: that line would itself be new
+// content and trigger another upload every interval, forever.
+static void uploadNewLogContent(LogUploader& logUploader) {
+    if (const auto exitCode = logUploader.reapFinishedUpload(); exitCode && *exitCode != 0) {
+        g_log.log("Log upload failed with exit code {} (will retry)", *exitCode);
     }
-    return false;
+    if (logUploader.startUploadOfNewContent() == LogUploader::StartResult::Failed) {
+        g_log.write("Log upload could not be started");
+    }
 }
+
+// Used on every exit path, so failures during startup get uploaded too.
+static void closeLogAndUploadRemainder(LogUploader& logUploader) {
+    if (const auto exitCode = logUploader.waitForPendingUpload(); exitCode && *exitCode != 0) {
+        g_log.log("Log upload failed with exit code {}", *exitCode);
+    }
+    g_log.close();   // everything is on disk now
+    if (logUploader.startUploadOfNewContent() == LogUploader::StartResult::Started) {
+        const int exitCode = logUploader.waitForPendingUpload().value_or(-1);
+        std::cout << "Final log upload exited with code " << exitCode << std::endl;
+    }
+}
+
+// ---------- main ----------
 
 int main() {
+    // 1. Block termination signals FIRST, before libcec creates any threads,
+    //    so every thread inherits the mask and signals arrive only via signalfd.
+    sigset_t terminationSignals;
+    sigemptyset(&terminationSignals);
+    sigaddset(&terminationSignals, SIGINT);
+    sigaddset(&terminationSignals, SIGTERM);
+    pthread_sigmask(SIG_BLOCK, &terminationSignals, nullptr);
+
     if (!g_log.open(LOG_PATH)) {
         std::cerr << "Could not open log file\n";
         return 3;
     }
+    LogUploader logUploader(LOG_PATH, LOG_UPLOAD_CHUNK_PATH, NTFY_TOPIC);
 
-    // Setup callbacks
+    // 2. Event sources for the loop.
+    FileDescriptor signalFileDescriptor(
+        signalfd(-1, &terminationSignals, SFD_NONBLOCK | SFD_CLOEXEC));
+    FileDescriptor wakeTimerFileDescriptor(
+        timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC));
+    FileDescriptor uploadTimerFileDescriptor(
+        timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC));
+    FileDescriptor epollFileDescriptor(epoll_create1(EPOLL_CLOEXEC));
+
+    if (!signalFileDescriptor.isValid() || !wakeTimerFileDescriptor.isValid()
+        || !uploadTimerFileDescriptor.isValid() || !epollFileDescriptor.isValid()) {
+        g_log.log("Failed to create event file descriptors: {}", std::strerror(errno));
+        closeLogAndUploadRemainder(logUploader);
+        return 4;
+    }
+
+    // 3. libcec. Callbacks and configuration must outlive the adapter (they do: main's scope).
     CEC::ICECCallbacks callbacks;
     callbacks.Clear();
     callbacks.commandReceived = &onCommand;
     callbacks.logMessage = &onLog;
 
-    // Setup config
-    CEC::libcec_configuration config;
-    config.Clear();
-    snprintf(config.strDeviceName, sizeof(config.strDeviceName), "%s", DEVICE_NAME);
-    config.clientVersion = CEC::LIBCEC_VERSION_CURRENT;
-    config.bActivateSource = 0;
-    config.deviceTypes.Add(CEC::CEC_DEVICE_TYPE_PLAYBACK_DEVICE);
-    config.callbacks = &callbacks;
+    CEC::libcec_configuration configuration;
+    configuration.Clear();
+    snprintf(configuration.strDeviceName, sizeof(configuration.strDeviceName), "%s", DEVICE_NAME);
+    configuration.clientVersion = CEC::LIBCEC_VERSION_CURRENT;
+    configuration.bActivateSource = 0;     // we decide when to take the source
+    configuration.deviceTypes.Add(CEC::CEC_DEVICE_TYPE_PLAYBACK_DEVICE);
+    configuration.callbacks = &callbacks;
 
-    // Initialize adapter with config
-    g_adapter = LibCecInitialise(&config);
+    g_adapter = LibCecInitialise(&configuration);
     if (!g_adapter) {
         g_log.write("LibCecInitialise failed");
-        g_log.close();
-        uploadLog();
+        closeLogAndUploadRemainder(logUploader);
         return 1;
     }
 
-    // Attempt to connect adapter
-    CEC::cec_adapter_descriptor devs[4];
-    const int8_t n = g_adapter->DetectAdapters(devs, 4, nullptr, true);
-    if (n <= 0 || !g_adapter->Open(devs[0].strComName)) {
+    CEC::cec_adapter_descriptor adapterDescriptors[MAXIMUM_ADAPTERS];
+    const int adapterCount =
+        g_adapter->DetectAdapters(adapterDescriptors, MAXIMUM_ADAPTERS, nullptr, true);
+    for (int adapterIndex = 0; adapterIndex < adapterCount; ++adapterIndex) {
+        g_log.log("Found adapter {}: {} ({})", adapterIndex,
+                  adapterDescriptors[adapterIndex].strComName,
+                  adapterDescriptors[adapterIndex].strComPath);
+    }
+    if (adapterCount <= 0 || !g_adapter->Open(adapterDescriptors[0].strComName)) {
         g_log.write("Failed to detect/open adapter");
         UnloadLibCec(g_adapter);
-        g_log.close();
-        uploadLog();
+        closeLogAndUploadRemainder(logUploader);
         return 2;
     }
 
-    // Configure termination signal handler
-    std::signal(SIGINT, signalHandler);
-    std::signal(SIGTERM, signalHandler);
-
-    // ---------- Wake TV and grab focus ----------
-
-    // Must be read BEFORE PowerOnDevices: afterwards libcec marks the TV
-    // as "in transition" and the value tells you nothing.
-    const auto tvPower = g_adapter->GetDevicePowerStatus(CEC::CECDEVICE_TV);
-    g_log.log("TV power status before wake: {}", g_adapter->ToString(tvPower));
-
-    const bool powered = g_adapter->PowerOnDevices(CEC::CECDEVICE_TV);
-    g_log.log("Power on TV: {}", powered ? "ok" : "FAILED");
-
-    // TV already on: grab focus immediately.
-    // Standby, in transition, or unknown (no reply): give it time to boot first.
-    const int initialDelay = (tvPower == CEC::CEC_POWER_STATUS_ON) ? 0 : 3;
-    if (!grabFocus(3, 1, initialDelay))
-        g_log.write("TV never reacted to Active Source");
-
-    // ---------- Listen ----------
-    g_log.write("Listening...");
-    const auto deadline = std::chrono::steady_clock::now() + LISTEN_TIME;
-    while (g_running && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    CEC::libcec_configuration currentConfiguration;
+    if (g_adapter->GetCurrentConfiguration(&currentConfiguration)) {
+        g_ownPhysicalAddress = currentConfiguration.iPhysicalAddress;
     }
-    g_log.write(g_running ? "Listen time elapsed" : "Interrupted by signal");
+    g_log.log("Own physical address: {}", formatPhysicalAddress(g_ownPhysicalAddress.load()));
 
-    // ---------- Standby TV ----------
-    if (g_running) {
-        const bool standby = g_adapter->StandbyDevices(CEC::CECDEVICE_TV);
-        g_log.log("Standby TV: {}", standby ? "ok" : "FAILED");
+    // 4. Register event sources with epoll.
+    if (!watchForInput(epollFileDescriptor.get(), signalFileDescriptor.get())
+        || !watchForInput(epollFileDescriptor.get(), wakeTimerFileDescriptor.get())
+        || !watchForInput(epollFileDescriptor.get(), uploadTimerFileDescriptor.get())
+        || !watchForInput(epollFileDescriptor.get(), g_cecEventQueue.notificationFileDescriptor())) {
+        g_log.log("epoll_ctl failed: {}", std::strerror(errno));
+        closeCecAdapter();
+        closeLogAndUploadRemainder(logUploader);
+        return 5;
+    }
+    armRepeatingTimer(uploadTimerFileDescriptor.get(), FIRST_LOG_UPLOAD_DELAY, LOG_UPLOAD_INTERVAL);
+
+    // 5. State machine. For testing we wake on startup; later the controller does this.
+    PowerStateMachine powerStateMachine(g_adapter, wakeTimerFileDescriptor.get(), g_log);
+    powerStateMachine.requestWake();
+
+    // 6. Event loop: sleeps in the kernel until something is ready.
+    bool running = true;
+    while (running) {
+        epoll_event readyEvents[MAXIMUM_EVENTS_PER_WAIT];
+        const int readyCount = epoll_wait(epollFileDescriptor.get(), readyEvents,
+                                          MAXIMUM_EVENTS_PER_WAIT, -1);
+        if (readyCount < 0) {
+            if (errno == EINTR) continue;
+            g_log.log("epoll_wait failed: {}", std::strerror(errno));
+            break;
+        }
+
+        for (int readyIndex = 0; readyIndex < readyCount; ++readyIndex) {
+            const int readyFileDescriptor = readyEvents[readyIndex].data.fd;
+
+            if (readyFileDescriptor == signalFileDescriptor.get()) {
+                signalfd_siginfo signalInformation{};
+                [[maybe_unused]] const auto bytesRead =
+                    read(readyFileDescriptor, &signalInformation, sizeof signalInformation);
+                g_log.log("Received signal {}, shutting down", signalInformation.ssi_signo);
+                running = false;
+
+            } else if (readyFileDescriptor == wakeTimerFileDescriptor.get()) {
+                std::uint64_t expirationCount = 0;
+                const auto bytesRead =
+                    read(readyFileDescriptor, &expirationCount, sizeof expirationCount);
+                // EAGAIN here means the timer was disarmed earlier in this batch.
+                if (bytesRead == sizeof expirationCount) {
+                    powerStateMachine.onWakeTimerExpired();
+                }
+
+            } else if (readyFileDescriptor == uploadTimerFileDescriptor.get()) {
+                std::uint64_t expirationCount = 0;
+                [[maybe_unused]] const auto bytesRead =
+                    read(readyFileDescriptor, &expirationCount, sizeof expirationCount);
+                uploadNewLogContent(logUploader);
+
+            } else if (readyFileDescriptor == g_cecEventQueue.notificationFileDescriptor()) {
+                for (const CecEvent event : g_cecEventQueue.takeAll()) {
+                    powerStateMachine.onCecEvent(event);   // main thread: safe to call libcec
+                }
+            }
+        }
     }
 
-    // ---------- Shutdown ----------
-    g_adapter->Close();
-    UnloadLibCec(g_adapter);
-    g_log.write("Adapter closed");
-    g_log.close();
-    uploadLog();
+    // 7. Shutdown. The TV is deliberately left alone: restarts shouldn't blank the screen.
+    closeCecAdapter();
+    closeLogAndUploadRemainder(logUploader);
     return 0;
 }

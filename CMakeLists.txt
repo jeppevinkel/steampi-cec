@@ -10,6 +10,16 @@ pkg_check_modules(LIBCEC REQUIRED IMPORTED_TARGET libcec)
 
 add_executable(steampi_cec main.cpp
         Logger.cpp
-        Logger.h)
+        Logger.h
+        CecEventQueue.cpp
+        CecEventQueue.h
+        FileDescriptor.cpp
+        FileDescriptor.h
+        PhysicalAddress.h
+        PowerStateMachine.cpp
+        PowerStateMachine.h
+        LogUploader.cpp
+        LogUploader.h)
 
+target_compile_options(steampi_cec PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(steampi_cec PRIVATE PkgConfig::LIBCEC)

@@ -7,22 +7,22 @@
 #include <format>
 
 bool Logger::open(const char* path) {
-    std::scoped_lock lock(m_);
-    f_.open(path, std::ios::out | std::ios::trunc);
-    return f_.is_open();
+    std::scoped_lock lock(mutex_);
+    fileStream_.open(path, std::ios::out | std::ios::trunc);
+    return fileStream_.is_open();
 }
 
 void Logger::close() {
-    std::scoped_lock lock(m_);
-    if (f_.is_open()) f_.close();
+    std::scoped_lock lock(mutex_);
+    if (fileStream_.is_open()) fileStream_.close();
 }
 
 void Logger::write(const std::string_view msg) {
     const auto ts = timestamp();
-    std::scoped_lock lock(m_);
-    if (!f_.is_open()) return;
-    f_ << ts << "  " << msg << '\n';
-    f_.flush();
+    std::scoped_lock lock(mutex_);
+    if (!fileStream_.is_open()) return;
+    fileStream_ << ts << "  " << msg << '\n';
+    fileStream_.flush();
 }
 
 std::string Logger::timestamp() {

@@ -24,6 +24,6 @@ public:
 private:
     static std::string timestamp();
 
-    std::mutex m_;
-    std::ofstream f_;
+    std::mutex mutex_;
+    std::ofstream fileStream_;
 };
