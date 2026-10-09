@@ -5,64 +5,107 @@ section() {
     printf '\n===== %s =====\n' "$1"
 }
 
-section "usbhid parameters (mousepoll should be 2 after a reboot)"
-grep -H . /sys/module/usbhid/parameters/mousepoll 2>/dev/null
+section "mousepoll"
+echo "current value:  $(cat /sys/module/usbhid/parameters/mousepoll)"
+echo "/proc/cmdline:  $(grep -o 'usbhid[^ ]*' /proc/cmdline || echo none)"
+echo "cmdline.txt:    $(grep -o 'usbhid[^ ]*' /boot/firmware/cmdline.txt || echo none)"
+echo "usbhid built in: $(grep -c usbhid "/lib/modules/$(uname -r)/modules.builtin")"
+echo "modprobe.d options:"
+grep -rs mousepoll /etc/modprobe.d /lib/modprobe.d /usr/lib/modprobe.d || echo "  none"
 
-section "Valve hidraw devices: full report descriptors"
-for hidraw_path in /sys/class/hidraw/hidraw*; do
-    grep -q 28DE "${hidraw_path}/device/uevent" 2>/dev/null || continue
-    hidraw_name="${hidraw_path##*/}"
-    interface_name="$(grep HID_PHYS "${hidraw_path}/device/uevent" | sed 's|.*/||')"
-    descriptor_hex="$(od -An -tx1 -v -w4096 "${hidraw_path}/device/report_descriptor" | tr -s ' ')"
-    echo "-- ${hidraw_name} (${interface_name})"
-    # "85 xx" is how a descriptor declares report ID xx (a rough hint; the full dump follows).
-    echo "   report IDs: $(grep -o '85 [0-9a-f][0-9a-f]' <<< "${descriptor_hex}" | cut -d' ' -f2 | sort -u | tr '\n' ' ')"
-    echo "  ${descriptor_hex}"
-done
-
-section "hidraw permissions"
-ls -l /dev/hidraw*
-
-section "Live reports"
-echo ">>> Move the controller's stick and press buttons for the next 5 seconds..." > /dev/tty
+section "Controller button map (report 0x42)"
 python3 - <<'EOF'
 import glob
 import os
 import select
+import termios
 import time
 
-SAMPLE_SECONDS = 5
-REPORTS_TO_SHOW = 3
+PUCK_ID = '000028DE:00001304'
+MOUSE_COLLECTION_PREFIX = bytes([0x05, 0x01, 0x09, 0x02])   # slot interfaces start like this
+CONTROLLER_REPORT_ID = 0x42
+SETTLE_SECONDS = 1.5
+CAPTURE_SECONDS = 1.5
 
-names_by_file_descriptor = {}
-for uevent_path in glob.glob('/sys/class/hidraw/hidraw*/device/uevent'):
-    with open(uevent_path) as uevent_file:
-        uevent_text = uevent_file.read()
-    if '28DE' not in uevent_text:
-        continue
-    hidraw_name = uevent_path.split('/')[4]
-    interface_name = next(line for line in uevent_text.splitlines()
-                          if line.startswith('HID_PHYS')).rsplit('/', 1)[1]
-    try:
-        file_descriptor = os.open('/dev/' + hidraw_name, os.O_RDONLY | os.O_NONBLOCK)
-        names_by_file_descriptor[file_descriptor] = f'{hidraw_name} ({interface_name})'
-    except OSError as error:
-        print(f'-- {hidraw_name} ({interface_name}): cannot open: {error.strerror}')
+BUTTON_NAMES = [
+    'A', 'B', 'X', 'Y',
+    'D-pad up', 'D-pad down', 'D-pad left', 'D-pad right',
+    'Steam button', 'Menu (three lines)', 'View (two squares)',
+    'Left bumper', 'Right bumper',
+    'Left stick pushed fully right', 'Left stick pushed fully up',
+]
 
-report_counts = {file_descriptor: 0 for file_descriptor in names_by_file_descriptor}
-sample_reports = {file_descriptor: [] for file_descriptor in names_by_file_descriptor}
-deadline = time.monotonic() + SAMPLE_SECONDS
-while names_by_file_descriptor and (remaining_seconds := deadline - time.monotonic()) > 0:
-    ready_file_descriptors, _, _ = select.select(list(names_by_file_descriptor), [], [], remaining_seconds)
-    for file_descriptor in ready_file_descriptors:
-        report = os.read(file_descriptor, 256)   # one read returns exactly one report
-        report_counts[file_descriptor] += 1
-        if len(sample_reports[file_descriptor]) < REPORTS_TO_SHOW:
-            sample_reports[file_descriptor].append(report)
+terminal = open('/dev/tty', 'w')
 
-for file_descriptor, display_name in sorted(names_by_file_descriptor.items(), key=lambda item: item[1]):
-    print(f'-- {display_name}: {report_counts[file_descriptor]} reports in {SAMPLE_SECONDS} s')
-    for report in sample_reports[file_descriptor]:
-        print(f'   {len(report):3} bytes: {report.hex(" ")}')
+def tell_user(message):
+    terminal.write(message)
+    terminal.flush()
+
+def open_slot_interfaces():
+    file_descriptors = []
+    for uevent_path in sorted(glob.glob('/sys/class/hidraw/hidraw*/device/uevent')):
+        with open(uevent_path) as uevent_file:
+            if PUCK_ID not in uevent_file.read():
+                continue
+        with open(os.path.join(os.path.dirname(uevent_path), 'report_descriptor'), 'rb') as descriptor_file:
+            if not descriptor_file.read().startswith(MOUSE_COLLECTION_PREFIX):
+                continue
+        hidraw_name = uevent_path.split('/')[4]
+        file_descriptors.append(os.open('/dev/' + hidraw_name, os.O_RDONLY | os.O_NONBLOCK))
+    return file_descriptors
+
+def capture_reports(file_descriptors, seconds):
+    controller_reports = []
+    deadline = time.monotonic() + seconds
+    while (remaining_seconds := deadline - time.monotonic()) > 0:
+        ready_file_descriptors, _, _ = select.select(file_descriptors, [], [], remaining_seconds)
+        for file_descriptor in ready_file_descriptors:
+            report = os.read(file_descriptor, 256)
+            if report and report[0] == CONTROLLER_REPORT_ID:
+                controller_reports.append(report)
+    return controller_reports
+
+def constant_bits(reports):
+    """{(byte_index, bit_index): value} for every bit that never changes across the reports."""
+    if not reports:
+        return {}
+    report_length = min(len(report) for report in reports)
+    bits = {}
+    for byte_index in range(1, report_length):            # byte 0 is the report ID
+        byte_values = {report[byte_index] for report in reports}
+        for bit_index in range(8):
+            bit_values = {(byte_value >> bit_index) & 1 for byte_value in byte_values}
+            if len(bit_values) == 1:
+                bits[(byte_index, bit_index)] = bit_values.pop()
+    return bits
+
+slot_file_descriptors = open_slot_interfaces()
+if not slot_file_descriptors:
+    print('No puck slot interfaces found (or permission denied).')
+    raise SystemExit
+
+tell_user('>>> Put the controller down and do NOT touch it...\n')
+capture_reports(slot_file_descriptors, SETTLE_SECONDS)
+baseline_reports = capture_reports(slot_file_descriptors, 2.0)
+baseline_bits = constant_bits(baseline_reports)
+print(f'Baseline: {len(baseline_reports)} reports, {len(baseline_bits)} stable bits')
+
+for button_name in BUTTON_NAMES:
+    tell_user(f'>>> Press and HOLD: {button_name} ... ')
+    capture_reports(slot_file_descriptors, SETTLE_SECONDS)   # discards reports from before the press
+    held_reports = capture_reports(slot_file_descriptors, CAPTURE_SECONDS)
+    tell_user('release.\n')
+    capture_reports(slot_file_descriptors, 1.0)
+
+    held_bits = constant_bits(held_reports)
+    changed_bits = sorted(position for position, value in held_bits.items()
+                          if position in baseline_bits and baseline_bits[position] != value)
+    description = ', '.join(f'byte {byte_index} bit {bit_index} -> {held_bits[(byte_index, bit_index)]}'
+                            for byte_index, bit_index in changed_bits)
+    print(f'{button_name:32} {description or "no stable change found"}')
+
+# Lizard mode may have typed into this console while buttons were pressed; throw that away.
+with open('/dev/tty') as terminal_input:
+    termios.tcflush(terminal_input, termios.TCIFLUSH)
+tell_user('>>> Done, sending...\n')
 EOF
-echo ">>> Done, sending..." > /dev/tty
