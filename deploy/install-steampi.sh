@@ -105,6 +105,13 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y "${PACKAGES[@]}"
 
+# ---------- pitv commands ----------
+log_step "Installing pitv commands"
+for command_name in pitv-update pitv-diag; do
+    install_staged_file "${script_directory}/${command_name}" \
+        "/usr/local/bin/${command_name}" 0755 root
+done
+
 log_step "Installing Flex Launcher"
 flex_launcher_package="${working_directory}/$(basename "${FLEX_LAUNCHER_URL}")"
 curl --fail --location --silent --show-error --retry 3 \

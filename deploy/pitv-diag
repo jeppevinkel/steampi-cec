@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Runs the latest deploy/diagnostics.sh from GitHub and sends its output to ntfy.
+set -uo pipefail
+
+readonly DIAGNOSTICS_URL="https://raw.githubusercontent.com/jeppevinkel/steampi-cec/main/deploy/diagnostics.sh"
+readonly NTFY_URL="https://ntfy.sh/pitv-cec-jeppe"
+
+working_directory="$(mktemp -d)"
+trap 'rm -rf "${working_directory}"' EXIT
+
+if ! curl --fail --location --silent --show-error --output "${working_directory}/diagnostics.sh" "${DIAGNOSTICS_URL}"; then
+    echo "Could not download diagnostics.sh" >&2
+    exit 1
+fi
+
+bash "${working_directory}/diagnostics.sh" > "${working_directory}/output.txt" 2>&1
+curl --silent --show-error -T "${working_directory}/output.txt" \
+     -H "Filename: diagnostics-$(date +%Y%m%d-%H%M%S).txt" "${NTFY_URL}" > /dev/null
+echo "Sent to ntfy."

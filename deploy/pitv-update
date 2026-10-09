@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Fetches the latest deploy/ folder from GitHub and runs the install script from it.
+# The install script also updates the CEC daemon.
+set -euo pipefail
+
+readonly REPOSITORY_ARCHIVE_URL="https://github.com/jeppevinkel/steampi-cec/archive/refs/heads/main.tar.gz"
+
+if [[ ${EUID} -ne 0 ]]; then
+    exec sudo bash "$0" "$@"
+fi
+
+working_directory="$(mktemp -d)"
+trap 'rm -rf "${working_directory}"' EXIT
+
+echo "Downloading deploy files..."
+curl --fail --location --silent --show-error --retry 3 "${REPOSITORY_ARCHIVE_URL}" \
+    | tar -xz -C "${working_directory}" --strip-components=1 --wildcards '*/deploy/*'
+
+bash "${working_directory}/deploy/install-steampi.sh"
