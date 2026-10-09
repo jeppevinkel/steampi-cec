@@ -13,7 +13,6 @@ add_executable(steampi_cec main.cpp
         Logger.h
         CecEventQueue.cpp
         CecEventQueue.h
-        FileDescriptor.cpp
         FileDescriptor.h
         PhysicalAddress.h
         PowerStateMachine.cpp
