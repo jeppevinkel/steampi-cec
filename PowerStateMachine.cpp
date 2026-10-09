@@ -18,18 +18,19 @@ void PowerStateMachine::requestWake() {
     const auto tvPowerStatus = adapter_->GetDevicePowerStatus(CEC::CECDEVICE_TV);
     log_.log("TV power status before wake: {}", adapter_->ToString(tvPowerStatus));
 
-    const bool poweredOn = adapter_->PowerOnDevices(CEC::CECDEVICE_TV);
-    log_.log("Power on TV: {}", poweredOn ? "ok" : "FAILED");
-
     state_ = PowerState::Waking;
     activeSourceAttempts_ = 0;
     log_.write("State: Waking");
 
     if (tvPowerStatus == CEC::CEC_POWER_STATUS_ON) {
-        onWakeTimerExpired();              // TV already up: grab the source right away
-    } else {
-        armWakeTimer(TV_BOOT_DELAY);       // give the TV time to boot first
+        // SetActiveSource sends Image View On itself; no separate power-on needed.
+        onWakeTimerExpired();
+        return;
     }
+
+    const bool poweredOn = adapter_->PowerOnDevices(CEC::CECDEVICE_TV);
+    log_.log("Power on TV: {}", poweredOn ? "ok" : "FAILED");
+    armWakeTimer(TV_BOOT_DELAY);
 }
 
 void PowerStateMachine::requestStandby() {
