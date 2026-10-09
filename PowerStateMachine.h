@@ -29,7 +29,7 @@ private:
     void enterActive();
     void enterStandby(bool sendStandbyToTv);
     void markTvShowingUs();
-    void beginWaking(const char* reason);
+    void beginWaking(const char* reason, bool tvAlreadyOn);
 
     // My Samsung takes ~2.1 s from Image View On to 'on'.
     static constexpr auto TV_BOOT_DELAY = std::chrono::milliseconds(3000);
@@ -37,6 +37,9 @@ private:
     static constexpr int MAXIMUM_ACTIVE_SOURCE_ATTEMPTS = 3;
     static constexpr auto APP_GRACE_AFTER_TV_STANDBY = std::chrono::minutes(5);
     static constexpr auto APP_GRACE_AFTER_SOURCE_SWITCH = std::chrono::minutes(30);
+    // Our Samsung only confirms (asks for deck status) when it actually switches to us. A TV that's
+    // already on hears our first message, so silence after this long means it already shows us.
+    static constexpr auto TV_ALREADY_ON_CONFIRMATION_WAIT = std::chrono::milliseconds(1000);
 
     CEC::ICECAdapter* adapter_;
     int wakeTimerFileDescriptor_;
@@ -45,4 +48,6 @@ private:
     PowerState state_ = PowerState::Standby;
     int activeSourceAttempts_ = 0;
     bool tvShowingOurInput_ = false;
+    int maximumActiveSourceAttempts_ = MAXIMUM_ACTIVE_SOURCE_ATTEMPTS;
+    std::chrono::milliseconds activeSourceRetryDelay_ = ACTIVE_SOURCE_RETRY_DELAY;
 };

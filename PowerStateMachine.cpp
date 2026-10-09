@@ -36,22 +36,20 @@ PowerStateMachine::PowerStateMachine(CEC::ICECAdapter* adapter,
 void PowerStateMachine::requestWake() {
     if (state_ == PowerState::Waking) return;
 
+    // Must be read BEFORE PowerOnDevices: afterwards libcec reports 'in transition'.
+    const auto tvPowerStatus = adapter_->GetDevicePowerStatus(CEC::CECDEVICE_TV);
+    const bool tvAlreadyOn = tvPowerStatus == CEC::CEC_POWER_STATUS_ON;
+    log_.log("TV power status before wake: {}", adapter_->ToString(tvPowerStatus));
+
     if (state_ == PowerState::Active) {
-        // Either the TV is on another input, or we believe we're on screen. Taking the source
-        // again is harmless if we are, and recovers if our state is stale (e.g. the TV lost
-        // power and never sent Standby). SetActiveSource also sends Image View On, and the
-        // retries cover a TV that still has to boot.
-        beginWaking(tvShowingOurInput_ ? "taking the source again" : "taking the TV back");
+        // SetActiveSource also sends Image View On, so this covers a TV that lost power too.
+        beginWaking(tvShowingOurInput_ ? "taking the source again" : "taking the TV back", tvAlreadyOn);
         onWakeTimerExpired();
         return;
     }
 
-    // Must be read BEFORE PowerOnDevices: afterwards libcec reports 'in transition'.
-    const auto tvPowerStatus = adapter_->GetDevicePowerStatus(CEC::CECDEVICE_TV);
-    log_.log("TV power status before wake: {}", adapter_->ToString(tvPowerStatus));
-    beginWaking("from standby");
-
-    if (tvPowerStatus == CEC::CEC_POWER_STATUS_ON) {
+    beginWaking("from standby", tvAlreadyOn);
+    if (tvAlreadyOn) {
         // SetActiveSource sends Image View On itself; no separate power-on needed.
         onWakeTimerExpired();
         return;
@@ -62,9 +60,12 @@ void PowerStateMachine::requestWake() {
     armOneShotTimer(wakeTimerFileDescriptor_, TV_BOOT_DELAY);
 }
 
-void PowerStateMachine::beginWaking(const char* reason) {
+void PowerStateMachine::beginWaking(const char* reason, const bool tvAlreadyOn) {
     state_ = PowerState::Waking;
     activeSourceAttempts_ = 0;
+    // A booting TV may miss our first messages, so retry. A TV that's already on hears the first.
+    maximumActiveSourceAttempts_ = tvAlreadyOn ? 1 : MAXIMUM_ACTIVE_SOURCE_ATTEMPTS;
+    activeSourceRetryDelay_ = tvAlreadyOn ? TV_ALREADY_ON_CONFIRMATION_WAIT : ACTIVE_SOURCE_RETRY_DELAY;
     log_.log("State: Waking ({})", reason);
 }
 
@@ -75,8 +76,11 @@ void PowerStateMachine::requestStandby() {
 void PowerStateMachine::onWakeTimerExpired() {
     if (state_ != PowerState::Waking) return;
 
-    if (activeSourceAttempts_ >= MAXIMUM_ACTIVE_SOURCE_ATTEMPTS) {
-        log_.write("TV never confirmed Active Source; assuming active");
+    if (activeSourceAttempts_ >= maximumActiveSourceAttempts_) {
+        // No confirmation usually means the TV already shows us (it only confirms a switch).
+        // A real switch away still arrives as SelectedOther and clears this again.
+        log_.write("TV didn't confirm Active Source; assuming it shows us");
+        markTvShowingUs();
         enterActive();
         return;
     }
@@ -85,8 +89,8 @@ void PowerStateMachine::onWakeTimerExpired() {
     const bool activeSourceSent = adapter_->SetActiveSource(CEC::CEC_DEVICE_TYPE_PLAYBACK_DEVICE);
     log_.log("Active Source attempt {}: sent={}", activeSourceAttempts_, activeSourceSent);
 
-    // Retry unless the TV confirms first.
-    armOneShotTimer(wakeTimerFileDescriptor_, ACTIVE_SOURCE_RETRY_DELAY);
+    // Retry (or give up) unless the TV confirms first.
+    armOneShotTimer(wakeTimerFileDescriptor_, activeSourceRetryDelay_);
 }
 
 // The TV confirmed it shows us: anything counting down towards closing the app stops.
