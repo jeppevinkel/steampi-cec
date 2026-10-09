@@ -6,10 +6,31 @@
 
 #include <sys/timerfd.h>
 
+namespace {
+
+// delay must be > 0: an all-zero it_value disarms the timer instead of firing it.
+void armOneShotTimer(const int timerFileDescriptor, const std::chrono::milliseconds delay) {
+    itimerspec timerSpecification{};               // zero it_interval = one-shot
+    timerSpecification.it_value.tv_sec  = delay.count() / 1000;
+    timerSpecification.it_value.tv_nsec = (delay.count() % 1000) * 1'000'000;
+    timerfd_settime(timerFileDescriptor, 0, &timerSpecification, nullptr);
+}
+
+void disarmTimer(const int timerFileDescriptor) {
+    constexpr itimerspec zeroSpecification{};      // all-zero it_value disarms
+    timerfd_settime(timerFileDescriptor, 0, &zeroSpecification, nullptr);
+}
+
+}  // namespace
+
 PowerStateMachine::PowerStateMachine(CEC::ICECAdapter* adapter,
                                      const int wakeTimerFileDescriptor,
+                                     const int unattendedAppTimerFileDescriptor,
                                      Logger& log)
-    : adapter_(adapter), wakeTimerFileDescriptor_(wakeTimerFileDescriptor), log_(log) {}
+    : adapter_(adapter),
+      wakeTimerFileDescriptor_(wakeTimerFileDescriptor),
+      unattendedAppTimerFileDescriptor_(unattendedAppTimerFileDescriptor),
+      log_(log) {}
 
 void PowerStateMachine::requestWake() {
     if (state_ == PowerState::Waking) return;
@@ -37,7 +58,7 @@ void PowerStateMachine::requestWake() {
 
     const bool poweredOn = adapter_->PowerOnDevices(CEC::CECDEVICE_TV);
     log_.log("Power on TV: {}", poweredOn ? "ok" : "FAILED");
-    armWakeTimer(TV_BOOT_DELAY);
+    armOneShotTimer(wakeTimerFileDescriptor_, TV_BOOT_DELAY);
 }
 
 void PowerStateMachine::beginWaking(const char* reason) {
@@ -63,7 +84,14 @@ void PowerStateMachine::onWakeTimerExpired() {
     const bool activeSourceSent = adapter_->SetActiveSource(CEC::CEC_DEVICE_TYPE_PLAYBACK_DEVICE);
     log_.log("Active Source attempt {}: sent={}", activeSourceAttempts_, activeSourceSent);
 
-    armWakeTimer(ACTIVE_SOURCE_RETRY_DELAY);   // retry unless the TV confirms first
+    // Retry unless the TV confirms first.
+    armOneShotTimer(wakeTimerFileDescriptor_, ACTIVE_SOURCE_RETRY_DELAY);
+}
+
+// The TV confirmed it shows us: anything counting down towards closing the app stops.
+void PowerStateMachine::markTvShowingUs() {
+    tvShowingOurInput_ = true;
+    disarmTimer(unattendedAppTimerFileDescriptor_);
 }
 
 void PowerStateMachine::onCecEvent(const CecEvent event) {
@@ -77,22 +105,24 @@ void PowerStateMachine::onCecEvent(const CecEvent event) {
 
         case CecEvent::TvQueriedDeckStatus:
             // Our Samsung's confirmation that it accepted our Active Source.
-            tvShowingOurInput_ = true;
+            markTvShowingUs();
             if (state_ == PowerState::Waking) enterActive();
             break;
 
         case CecEvent::SelectedUs:
             // The TV picked our input: from its source menu, or on power-up if it was last on us.
-            tvShowingOurInput_ = true;
+            markTvShowingUs();
             if (state_ != PowerState::Active) enterActive();
             break;
 
         case CecEvent::SelectedOther:
-            // Ignored while Waking: that's the Samsung's boot routing noise.
-            if (state_ == PowerState::Active) {
+            // Ignored while Waking (the Samsung's boot noise). The tvShowingOurInput_ check makes
+            // the duplicate events, and later switches between other inputs, not restart the countdown.
+            if (state_ == PowerState::Active && tvShowingOurInput_) {
                 tvShowingOurInput_ = false;
-                log_.write("TV switched to another source");
-                // TODO: Do something.
+                log_.write("TV switched to another source; app grace period started");
+                armOneShotTimer(unattendedAppTimerFileDescriptor_, APP_GRACE_AFTER_SOURCE_SWITCH);
+                // TODO: updateBackgroundPlayback();
             }
             break;
     }
@@ -111,32 +141,33 @@ bool PowerStateMachine::onControllerButtonPressed(const bool isTakeOverButton) {
 }
 
 void PowerStateMachine::enterActive() {
-    disarmWakeTimer();
+    disarmTimer(wakeTimerFileDescriptor_);
     state_ = PowerState::Active;
     log_.log("State: Active ({})", tvShowingOurInput_ ? "on screen" : "not confirmed");
     // TODO: updateBackgroundPlayback();
 }
 
 void PowerStateMachine::enterStandby(const bool sendStandbyToTv) {
-    disarmWakeTimer();
+    disarmTimer(wakeTimerFileDescriptor_);
     if (sendStandbyToTv) {
+        // The user chose standby from the launcher: close everything right away.
         const bool standbySent = adapter_->StandbyDevices(CEC::CECDEVICE_TV);
         log_.log("Standby TV: {}", standbySent ? "ok" : "FAILED");
+        disarmTimer(unattendedAppTimerFileDescriptor_);
+        // TODO: end the running app's lease (closes the app).
+    } else {
+        // The TV turned itself off (remote, or its own auto power-off): the app may still be wanted.
+        armOneShotTimer(unattendedAppTimerFileDescriptor_, APP_GRACE_AFTER_TV_STANDBY);
     }
     tvShowingOurInput_ = false;
     state_ = PowerState::Standby;
     log_.write("State: Standby");
-    // TODO: end the running app's lease (closes the app), controller to Navigation, updateBackgroundPlayback();
+    // TODO: updateBackgroundPlayback();
 }
 
-void PowerStateMachine::armWakeTimer(const std::chrono::milliseconds delay) {
-    itimerspec timerSpecification{};               // zero it_interval = one-shot
-    timerSpecification.it_value.tv_sec  = delay.count() / 1000;
-    timerSpecification.it_value.tv_nsec = (delay.count() % 1000) * 1'000'000;
-    timerfd_settime(wakeTimerFileDescriptor_, 0, &timerSpecification, nullptr);
-}
-
-void PowerStateMachine::disarmWakeTimer() {
-    constexpr itimerspec zeroSpecification{};          // all-zero it_value disarms
-    timerfd_settime(wakeTimerFileDescriptor_, 0, &zeroSpecification, nullptr);
+void PowerStateMachine::onUnattendedAppTimerExpired() {
+    if (tvShowingOurInput_) return;   // they came back in the same epoll batch
+    // TODO: once the lease exists, return early here if no app is running.
+    log_.write("App unattended past its grace period; closing it");
+    // TODO: end the running app's lease. The controller returns to Navigation when the app exits.
 }

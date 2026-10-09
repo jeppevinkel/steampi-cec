@@ -176,12 +176,15 @@ int main() {
         signalfd(-1, &terminationSignals, SFD_NONBLOCK | SFD_CLOEXEC));
     FileDescriptor wakeTimerFileDescriptor(
         timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC));
+    FileDescriptor unattendedAppTimerFileDescriptor(
+        timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC));
     FileDescriptor uploadTimerFileDescriptor(
         timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC));
     FileDescriptor epollFileDescriptor(epoll_create1(EPOLL_CLOEXEC));
 
     if (!signalFileDescriptor.isValid() || !wakeTimerFileDescriptor.isValid()
-        || !uploadTimerFileDescriptor.isValid() || !epollFileDescriptor.isValid()) {
+        || !unattendedAppTimerFileDescriptor.isValid() || !uploadTimerFileDescriptor.isValid()
+        || !epollFileDescriptor.isValid()) {
         g_log.log("Failed to create event file descriptors: {}", std::strerror(errno));
         closeLogAndUploadRemainder(logUploader);
         return 4;
@@ -232,6 +235,7 @@ int main() {
     // 4. Register event sources with epoll.
     if (!watchForInput(epollFileDescriptor.get(), signalFileDescriptor.get())
         || !watchForInput(epollFileDescriptor.get(), wakeTimerFileDescriptor.get())
+        || !watchForInput(epollFileDescriptor.get(), unattendedAppTimerFileDescriptor.get())
         || !watchForInput(epollFileDescriptor.get(), uploadTimerFileDescriptor.get())
         || !watchForInput(epollFileDescriptor.get(), g_cecEventQueue.notificationFileDescriptor())) {
         g_log.log("epoll_ctl failed: {}", std::strerror(errno));
@@ -242,7 +246,8 @@ int main() {
     armRepeatingTimer(uploadTimerFileDescriptor.get(), FIRST_LOG_UPLOAD_DELAY, LOG_UPLOAD_INTERVAL);
 
     // 5. State machine. For testing we wake on startup; later the controller does this.
-    PowerStateMachine powerStateMachine(g_adapter, wakeTimerFileDescriptor.get(), g_log);
+    PowerStateMachine powerStateMachine(g_adapter, wakeTimerFileDescriptor.get(),
+                                        unattendedAppTimerFileDescriptor.get(), g_log);
     powerStateMachine.requestWake();
 
     // 6. Event loop: sleeps in the kernel until something is ready.
@@ -274,6 +279,15 @@ int main() {
                 // EAGAIN here means the timer was disarmed earlier in this batch.
                 if (bytesRead == sizeof expirationCount) {
                     powerStateMachine.onWakeTimerExpired();
+                }
+
+            } else if (readyFileDescriptor == unattendedAppTimerFileDescriptor.get()) {
+                std::uint64_t expirationCount = 0;
+                const auto bytesRead =
+                    read(readyFileDescriptor, &expirationCount, sizeof expirationCount);
+                // EAGAIN means it was disarmed earlier in this batch (the user came back).
+                if (bytesRead == sizeof expirationCount) {
+                    powerStateMachine.onUnattendedAppTimerExpired();
                 }
 
             } else if (readyFileDescriptor == uploadTimerFileDescriptor.get()) {
