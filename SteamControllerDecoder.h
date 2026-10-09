@@ -22,6 +22,17 @@ constexpr ControllerButtonSet buttonBit(const ControllerButton button) {
     return ControllerButtonSet{1} << static_cast<uint8_t>(button);
 }
 
+constexpr auto LAST_CONTROLLER_BUTTON = ControllerButton::StickRight;
+
+// Calls handleButton for every button in the set, in enum order.
+template <typename ButtonHandler>
+void forEachButton(const ControllerButtonSet buttons, ButtonHandler&& handleButton) {
+    for (uint8_t buttonIndex = 0; buttonIndex <= static_cast<uint8_t>(LAST_CONTROLLER_BUTTON); ++buttonIndex) {
+        const auto button = static_cast<ControllerButton>(buttonIndex);
+        if (buttons & buttonBit(button)) handleButton(button);
+    }
+}
+
 class SteamControllerDecoder {
 public:
     static constexpr uint8_t REPORT_ID = 0x42;
