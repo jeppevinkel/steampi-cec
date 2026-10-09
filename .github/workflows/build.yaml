@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
-    container: debian:trixie
+    container: public.ecr.aws/docker/library/debian:trixie
     strategy:
       fail-fast: false
       matrix:
