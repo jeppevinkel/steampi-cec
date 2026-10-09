@@ -12,7 +12,9 @@
 #   flex-launcher/          mirrors ~/.config/flex-launcher (config, icons, scripts)
 #   update-steampi-cec.sh   the daemon updater; installed to ~ and run once
 
-set -euo pipefail
+set -eEuo pipefail
+# With set -e, a failing command ends the script without a word; say which one it was.
+trap 'echo "FAILED at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 readonly TARGET_USER="jeppe"
 readonly FLEX_LAUNCHER_URL="https://github.com/complexlogic/flex-launcher/releases/download/v2.2/flex-launcher_2.2_arm64.deb"
@@ -275,7 +277,14 @@ if ! grep -qx 'disable_splash=1' "${staged_boot_config}"; then
 fi
 replace_boot_file "${staged_boot_config}" "${BOOT_CONFIG_PATH}"
 
-read -r -a original_kernel_arguments < "${KERNEL_COMMAND_LINE_PATH}"
+# cmdline.txt usually has no trailing newline. read then returns 1 at end of file even though
+# it did read the line, which set -e would treat as a failure.
+read -r -a original_kernel_arguments < "${KERNEL_COMMAND_LINE_PATH}" || true
+# Never write a command line without root=: the Pi would not boot.
+if [[ " ${original_kernel_arguments[*]} " != *" root="* ]]; then
+    echo "    ERROR: no root= in ${KERNEL_COMMAND_LINE_PATH}; leaving it untouched." >&2
+    exit 1
+fi
 updated_kernel_arguments=()
 for kernel_argument in "${original_kernel_arguments[@]}"; do
     case "${kernel_argument}" in

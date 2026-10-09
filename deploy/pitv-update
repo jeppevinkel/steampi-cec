@@ -12,7 +12,6 @@ fi
 
 run_update() {
     set -euo pipefail
-    local working_directory
     working_directory="$(mktemp -d)"
     trap 'rm -rf "${working_directory}"' EXIT
 
