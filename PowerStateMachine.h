@@ -21,6 +21,7 @@ public:
     void requestStandby();       // later: launcher's standby button
     void onWakeTimerExpired();
     void onCecEvent(CecEvent event);
+    bool onControllerButtonPressed(bool isTakeOverButton);
 
 private:
     void enterActive();

@@ -77,6 +77,7 @@ void PowerStateMachine::onCecEvent(const CecEvent event) {
 
         case CecEvent::TvQueriedDeckStatus:
             // Our Samsung's confirmation that it accepted our Active Source.
+            tvShowingOurInput_ = true;
             if (state_ == PowerState::Waking) enterActive();
             break;
 
@@ -91,18 +92,29 @@ void PowerStateMachine::onCecEvent(const CecEvent event) {
             if (state_ == PowerState::Active) {
                 tvShowingOurInput_ = false;
                 log_.write("TV switched to another source");
-                // TODO: stop streaming, or treat as standby.
+                // TODO: Do something.
             }
             break;
     }
 }
 
+// Called for every controller button press while the daemon owns the controller.
+// Returns true if the press was used for waking/taking over, false if it's navigation.
+bool PowerStateMachine::onControllerButtonPressed(const bool isTakeOverButton) {
+    if (state_ == PowerState::Waking) return true;   // swallow presses until the TV is ready
+
+    const bool wantsTheTv = state_ == PowerState::Standby
+                            || !tvShowingOurInput_
+                            || isTakeOverButton;
+    if (wantsTheTv) requestWake();
+    return wantsTheTv;
+}
+
 void PowerStateMachine::enterActive() {
     disarmWakeTimer();
-    tvShowingOurInput_ = true;   // every way into Active means the TV shows us (or is assumed to)
     state_ = PowerState::Active;
-    log_.write("State: Active");
-    // TODO: launch Flex Launcher.
+    log_.log("State: Active ({})", tvShowingOurInput_ ? "on screen" : "not confirmed");
+    // TODO: updateBackgroundPlayback();
 }
 
 void PowerStateMachine::enterStandby(const bool sendStandbyToTv) {
@@ -114,7 +126,7 @@ void PowerStateMachine::enterStandby(const bool sendStandbyToTv) {
     tvShowingOurInput_ = false;
     state_ = PowerState::Standby;
     log_.write("State: Standby");
-    // TODO: stop apps and Flex Launcher.
+    // TODO: end the running app's lease (closes the app), controller to Navigation, updateBackgroundPlayback();
 }
 
 void PowerStateMachine::armWakeTimer(const std::chrono::milliseconds delay) {
