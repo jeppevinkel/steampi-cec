@@ -18,7 +18,10 @@ public:
     PowerStateMachine(CEC::ICECAdapter* adapter, int wakeTimerFileDescriptor,
                       int unattendedAppTimerFileDescriptor, Logger& log);
 
-    void requestWake();          // later: controller press
+    // Called once after the CEC adapter is open. Never turns the TV on: an update or reboot at
+    // night shouldn't light up the living room. If the TV is already on, we take the source.
+    void startUp();
+    void requestWake();          // controller press
     void requestStandby();       // later: launcher's standby button
     void onWakeTimerExpired();
     void onUnattendedAppTimerExpired();

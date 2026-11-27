@@ -30,6 +30,7 @@
 #include "PhysicalAddress.h"
 #include "PowerStateMachine.h"
 #include "SteamControllerPuck.h"
+#include "Timers.h"
 #include "VirtualKeyboard.h"
 
 static constexpr auto DEVICE_NAME = "PiTV";
@@ -149,15 +150,6 @@ static void onKeyPress(void*, const CEC::cec_keypress* keyPress) {
 }
 
 // ---------- helpers ----------
-
-static void armRepeatingTimer(const int timerFileDescriptor,
-                              const std::chrono::seconds firstDelay,
-                              const std::chrono::seconds interval) {
-    itimerspec timerSpecification{};
-    timerSpecification.it_value.tv_sec = firstDelay.count();
-    timerSpecification.it_interval.tv_sec = interval.count();
-    timerfd_settime(timerFileDescriptor, 0, &timerSpecification, nullptr);
-}
 
 static void closeCecAdapter() {
     g_adapter->Close();
@@ -286,12 +278,12 @@ int main() {
         closeLogAndUploadRemainder(logUploader);
         return 5;
     }
-    armRepeatingTimer(uploadTimerFileDescriptor.get(), FIRST_LOG_UPLOAD_DELAY, LOG_UPLOAD_INTERVAL);
+    armTimer(uploadTimerFileDescriptor.get(), FIRST_LOG_UPLOAD_DELAY, LOG_UPLOAD_INTERVAL);
 
-    // 5. State machine. For testing we wake on startup; later the controller does this.
+    // 5. State machine. The controller or the TV itself wakes us; startup never turns the TV on.
     PowerStateMachine powerStateMachine(g_adapter, wakeTimerFileDescriptor.get(),
                                         unattendedAppTimerFileDescriptor.get(), g_log);
-    powerStateMachine.requestWake();
+    powerStateMachine.startUp();
 
     // Controller support is optional: if it can't be set up, CEC and the TV remote keep working.
     std::optional<ControllerNavigation> controllerNavigation;
@@ -335,27 +327,19 @@ int main() {
                     running = false;
 
                 } else if (readyFileDescriptor == wakeTimerFileDescriptor.get()) {
-                    std::uint64_t expirationCount = 0;
-                    const auto bytesRead =
-                        read(readyFileDescriptor, &expirationCount, sizeof expirationCount);
-                    // EAGAIN here means the timer was disarmed earlier in this batch.
-                    if (bytesRead == sizeof expirationCount) {
+                    // Nothing to read means the timer was disarmed earlier in this batch.
+                    if (consumeTimerExpiration(readyFileDescriptor)) {
                         powerStateMachine.onWakeTimerExpired();
                     }
 
                 } else if (readyFileDescriptor == unattendedAppTimerFileDescriptor.get()) {
-                    std::uint64_t expirationCount = 0;
-                    const auto bytesRead =
-                        read(readyFileDescriptor, &expirationCount, sizeof expirationCount);
-                    // EAGAIN means it was disarmed earlier in this batch (the user came back).
-                    if (bytesRead == sizeof expirationCount) {
+                    // Nothing to read means it was disarmed earlier in this batch (the user came back).
+                    if (consumeTimerExpiration(readyFileDescriptor)) {
                         powerStateMachine.onUnattendedAppTimerExpired();
                     }
 
                 } else if (readyFileDescriptor == uploadTimerFileDescriptor.get()) {
-                    std::uint64_t expirationCount = 0;
-                    [[maybe_unused]] const auto bytesRead =
-                        read(readyFileDescriptor, &expirationCount, sizeof expirationCount);
+                    consumeTimerExpiration(readyFileDescriptor);
                     uploadNewLogContent(logUploader);
 
                 } else if (readyFileDescriptor == g_cecEventQueue.notificationFileDescriptor()) {
