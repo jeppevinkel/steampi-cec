@@ -4,25 +4,7 @@
 
 #include "PowerStateMachine.h"
 
-#include <sys/timerfd.h>
-
-// TODO: switch to armTimer/disarmTimer from Timers.h so there's only one copy.
-namespace {
-
-// delay must be > 0: an all-zero it_value disarms the timer instead of firing it.
-void armOneShotTimer(const int timerFileDescriptor, const std::chrono::milliseconds delay) {
-    itimerspec timerSpecification{};               // zero it_interval = one-shot
-    timerSpecification.it_value.tv_sec  = delay.count() / 1000;
-    timerSpecification.it_value.tv_nsec = (delay.count() % 1000) * 1'000'000;
-    timerfd_settime(timerFileDescriptor, 0, &timerSpecification, nullptr);
-}
-
-void disarmTimer(const int timerFileDescriptor) {
-    constexpr itimerspec zeroSpecification{};      // all-zero it_value disarms
-    timerfd_settime(timerFileDescriptor, 0, &zeroSpecification, nullptr);
-}
-
-}  // namespace
+#include "Timers.h"
 
 PowerStateMachine::PowerStateMachine(CEC::ICECAdapter* adapter,
                                      const int wakeTimerFileDescriptor,
@@ -57,7 +39,7 @@ void PowerStateMachine::requestWake() {
 
     const bool poweredOn = adapter_->PowerOnDevices(CEC::CECDEVICE_TV);
     log_.log("Power on TV: {}", poweredOn ? "ok" : "FAILED");
-    armOneShotTimer(wakeTimerFileDescriptor_, TV_BOOT_DELAY);
+    armTimer(wakeTimerFileDescriptor_, TV_BOOT_DELAY);
 }
 
 void PowerStateMachine::beginWaking(const char* reason, const bool tvAlreadyOn) {
@@ -90,7 +72,7 @@ void PowerStateMachine::onWakeTimerExpired() {
     log_.log("Active Source attempt {}: sent={}", activeSourceAttempts_, activeSourceSent);
 
     // Retry (or give up) unless the TV confirms first.
-    armOneShotTimer(wakeTimerFileDescriptor_, activeSourceRetryDelay_);
+    armTimer(wakeTimerFileDescriptor_, activeSourceRetryDelay_);
 }
 
 // The TV confirmed it shows us: anything counting down towards closing the app stops.
@@ -126,7 +108,7 @@ void PowerStateMachine::onCecEvent(const CecEvent event) {
             if (state_ == PowerState::Active && tvShowingOurInput_) {
                 tvShowingOurInput_ = false;
                 log_.write("TV switched to another source; app grace period started");
-                armOneShotTimer(unattendedAppTimerFileDescriptor_, APP_GRACE_AFTER_SOURCE_SWITCH);
+                armTimer(unattendedAppTimerFileDescriptor_, APP_GRACE_AFTER_SOURCE_SWITCH);
                 // TODO: updateBackgroundPlayback();
             }
             break;
@@ -162,7 +144,7 @@ void PowerStateMachine::enterStandby(const bool sendStandbyToTv) {
         // TODO: end the running app's lease (closes the app).
     } else {
         // The TV turned itself off (remote, or its own auto power-off): the app may still be wanted.
-        armOneShotTimer(unattendedAppTimerFileDescriptor_, APP_GRACE_AFTER_TV_STANDBY);
+        armTimer(unattendedAppTimerFileDescriptor_, APP_GRACE_AFTER_TV_STANDBY);
     }
     tvShowingOurInput_ = false;
     state_ = PowerState::Standby;
