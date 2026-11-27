@@ -30,8 +30,6 @@ add_executable(steampi_cec main.cpp
         ControllerRouter.cpp
         ControllerRouter.h
         ControllerMode.h
-        VirtualGamepad.cpp
-        VirtualGamepad.h
         AppProfiles.h
         ControlProtocol.h
         ControlServer.cpp

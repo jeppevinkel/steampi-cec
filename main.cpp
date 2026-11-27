@@ -317,7 +317,7 @@ int main(const int argumentCount, char* arguments[]) {
 
     const auto applyControllerMode = [&controllerRouter, &steamControllerPuck](const ControllerMode mode) {
         if (!controllerRouter) return;
-        controllerRouter->setMode(mode);   // may fall back to Released
+        controllerRouter->setMode(mode);
         if (steamControllerPuck) {
             steamControllerPuck->setLizardModeGrabbed(controllerRouter->mode() != ControllerMode::Released);
         }

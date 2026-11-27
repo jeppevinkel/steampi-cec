@@ -15,8 +15,9 @@ struct AppProfile {
 };
 
 inline constexpr AppProfile APP_PROFILES[] = {
-    // Steam Link's SDL3 doesn't know the 2026 controller, so it gets a virtual Xbox 360 gamepad.
-    {"steamlink", "exec /usr/bin/steamlink", ControllerMode::VirtualGamepad, true},
+    // Steam Link supports the 2026 controller itself: it opens the puck's hidraw devices, switches
+    // lizard mode off and streams the controller to Steam on the PC (trackpads and gyro included).
+    {"steamlink", "exec /usr/bin/steamlink", ControllerMode::Released, true},
     {"test-pattern",
      "exec mpv --fullscreen --no-osc --no-input-default-bindings"
      " 'av://lavfi:testsrc=duration=5:size=1920x1080:rate=30'",
