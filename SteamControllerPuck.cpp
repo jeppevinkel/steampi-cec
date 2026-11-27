@@ -121,17 +121,40 @@ bool SteamControllerPuck::openPuck() {
 
     if (slotFileDescriptors_.empty()) return false;
 
-    grabLizardModeInputs();
-    if (grabbedInputFileDescriptors_.empty()) {
-        // Reading without the grab would let lizard mode's keys and clicks reach X: try again later.
-        log_.write("Steam Controller puck found, but its lizard-mode inputs couldn't be grabbed yet");
-        closePuck();
-        return false;
+    if (lizardModeGrabbed_) {
+        grabLizardModeInputs();
+        if (grabbedInputFileDescriptors_.empty()) {
+            // Reading without the grab would let lizard mode's keys and clicks reach X: try again later.
+            log_.write("Steam Controller puck found, but its lizard-mode inputs couldn't be grabbed yet");
+            closePuck();
+            return false;
+        }
     }
 
     log_.log("Steam Controller puck: {} slot interfaces open, {} lizard-mode inputs grabbed",
              slotFileDescriptors_.size(), grabbedInputFileDescriptors_.size());
     return true;
+}
+
+void SteamControllerPuck::setLizardModeGrabbed(const bool grabbed) {
+    if (grabbed == lizardModeGrabbed_) return;
+    lizardModeGrabbed_ = grabbed;
+    if (slotFileDescriptors_.empty()) return;   // the next rescan applies it
+
+    if (!grabbed) {
+        grabbedInputFileDescriptors_.clear();   // closing the files releases the grabs
+        log_.write("Steam Controller puck: lizard-mode inputs released");
+        return;
+    }
+    grabLizardModeInputs();
+    if (grabbedInputFileDescriptors_.empty()) {
+        // An app may still hold its own grab for a moment after exiting: retry with the rescan.
+        log_.write("Steam Controller puck: lizard-mode inputs couldn't be grabbed again; retrying every 5 s");
+        closePuck();
+        armTimer(rescanTimerFileDescriptor_.get(), RESCAN_INTERVAL, RESCAN_INTERVAL);
+        return;
+    }
+    log_.log("Steam Controller puck: {} lizard-mode inputs grabbed again", grabbedInputFileDescriptors_.size());
 }
 
 void SteamControllerPuck::grabLizardModeInputs() {

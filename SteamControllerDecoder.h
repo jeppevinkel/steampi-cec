@@ -6,12 +6,13 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <optional>
 #include <span>
 
 // Buttons of the 2026 Steam Controller as decoded from its 0x42 input report.
 // The left stick's directions are included so it can navigate like a D-pad.
 enum class ControllerButton : uint8_t {
-    A, B, X, Y, Menu, View, Steam, LeftBumper, RightBumper,
+    A, B, X, Y, Menu, View, Steam, LeftBumper, RightBumper, LeftStickClick, RightStickClick,
     DPadUp, DPadDown, DPadLeft, DPadRight,
     StickUp, StickDown, StickLeft, StickRight,
 };
@@ -33,10 +34,24 @@ void forEachButton(const ControllerButtonSet buttons, ButtonHandler&& handleButt
     }
 }
 
+// Everything in one report, for passing the controller on as a gamepad.
+struct ControllerState {
+    ControllerButtonSet buttons = 0;   // physical buttons only, never the Stick* directions
+    int leftTrigger = 0;               // 0 (released) to 32767 (fully pulled)
+    int rightTrigger = 0;
+    int leftStickX = 0;                // -32768 to 32767, right is positive
+    int leftStickY = 0;                // -32768 to 32767, up is positive
+    int rightStickX = 0;
+    int rightStickY = 0;
+};
+
 class SteamControllerDecoder {
 public:
     static constexpr uint8_t REPORT_ID = 0x42;
     static constexpr std::size_t REPORT_SIZE = 54;
+
+    // Reads a 0x42 report. Reports with another ID or size give std::nullopt.
+    static std::optional<ControllerState> readState(std::span<const uint8_t> report);
 
     // Decodes one report and returns the buttons that went from released to pressed.
     // Reports with another ID or size are ignored (returns an empty set).

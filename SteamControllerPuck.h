@@ -29,6 +29,10 @@ public:
     // Returns true if the file descriptor belonged to the puck (and was handled).
     bool handleReadyFileDescriptor(int readyFileDescriptor);
 
+    // Whether lizard mode's keyboard and mouse are kept away from X. Released only for apps that
+    // read the controller themselves. Reports keep arriving either way.
+    void setLizardModeGrabbed(bool grabbed);
+
 private:
     bool openPuck();
     void grabLizardModeInputs();
@@ -41,4 +45,5 @@ private:
     std::vector<FileDescriptor> slotFileDescriptors_;
     std::vector<FileDescriptor> grabbedInputFileDescriptors_;
     FileDescriptor rescanTimerFileDescriptor_;
+    bool lizardModeGrabbed_ = true;
 };

@@ -9,36 +9,42 @@
 #include <optional>
 #include <span>
 
+#include "ControllerMode.h"
 #include "FileDescriptor.h"
 #include "Logger.h"
 #include "PowerStateMachine.h"
 #include "SteamControllerDecoder.h"
 #include "VirtualKeyboard.h"
 
-// Turns controller reports into navigation: waking or taking over the TV through the
-// power state machine, or key taps on the virtual keyboard, with key repeat for directions.
-// TODO: hand the controller off to Steam Link while it runs (needs the lease); until then,
-//  presses inside Steam Link also arrive as arrow and Enter keys.
-class ControllerNavigation {
+// Routes controller reports according to the current ControllerMode:
+// - Navigation: waking or taking over the TV through the power state machine, or key taps on
+//   the virtual keyboard, with key repeat for directions.
+// - Released: the app reads the controller itself. Presses still bring the TV back if it's off
+//   or showing another input.
+class ControllerRouter {
 public:
     // virtualKeyboard may be null (uinput unavailable): waking still works, keys are skipped.
     // Throws std::system_error if the repeat timer can't be created.
-    ControllerNavigation(int epollFileDescriptor, PowerStateMachine& powerStateMachine,
-                         VirtualKeyboard* virtualKeyboard, Logger& log);
+    ControllerRouter(int epollFileDescriptor, PowerStateMachine& powerStateMachine,
+                     VirtualKeyboard* virtualKeyboard, Logger& log);
 
     void onReport(std::span<const uint8_t> report);
 
     // Returns true if the file descriptor was the repeat timer (and was handled).
     bool handleReadyFileDescriptor(int readyFileDescriptor);
 
+    void setMode(ControllerMode mode);
+    [[nodiscard]] ControllerMode mode() const { return mode_; }
+
 private:
-    void onButtonPressed(ControllerButton button);
+    void onNavigationButtonPressed(ControllerButton button);
     void startRepeating(ControllerButton button, int linuxKeyCode);
     void stopRepeating();
 
     PowerStateMachine& powerStateMachine_;
     VirtualKeyboard* virtualKeyboard_;
     Logger& log_;
+    ControllerMode mode_ = ControllerMode::Navigation;
     SteamControllerDecoder decoder_;
     FileDescriptor repeatTimerFileDescriptor_;
     std::optional<ControllerButton> repeatingButton_;

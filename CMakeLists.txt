@@ -27,8 +27,15 @@ add_executable(steampi_cec main.cpp
         Timers.h
         SteamControllerPuck.cpp
         SteamControllerPuck.h
-        ControllerNavigation.cpp
-        ControllerNavigation.h)
+        ControllerRouter.cpp
+        ControllerRouter.h
+        ControllerMode.h
+        AppProfiles.h
+        ControlProtocol.h
+        ControlServer.cpp
+        ControlServer.h
+        AppLaunchClient.cpp
+        AppLaunchClient.h)
 
 target_compile_options(steampi_cec PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(steampi_cec PRIVATE PkgConfig::LIBCEC)

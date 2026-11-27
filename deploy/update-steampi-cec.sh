@@ -76,6 +76,8 @@ RestartSec=30
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/${SERVICE_USER}/.Xauthority
 Environment=XDG_RUNTIME_DIR=/run/user/${service_user_id}
+# /run/steampi: the control socket that Flex Launcher's tiles use to start apps through the daemon.
+RuntimeDirectory=steampi
 
 [Install]
 WantedBy=multi-user.target

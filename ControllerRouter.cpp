@@ -2,7 +2,7 @@
 // Created by jeppe on 09.10.2026.
 //
 
-#include "ControllerNavigation.h"
+#include "ControllerRouter.h"
 
 #include <cerrno>
 #include <system_error>
@@ -60,6 +60,8 @@ const char* controllerButtonName(const ControllerButton button) {
         case ControllerButton::Steam:       return "Steam";
         case ControllerButton::LeftBumper:  return "LeftBumper";
         case ControllerButton::RightBumper: return "RightBumper";
+        case ControllerButton::LeftStickClick:  return "LeftStickClick";
+        case ControllerButton::RightStickClick: return "RightStickClick";
         case ControllerButton::DPadUp:      return "DPadUp";
         case ControllerButton::DPadDown:    return "DPadDown";
         case ControllerButton::DPadLeft:    return "DPadLeft";
@@ -74,7 +76,7 @@ const char* controllerButtonName(const ControllerButton button) {
 
 }  // namespace
 
-ControllerNavigation::ControllerNavigation(const int epollFileDescriptor,
+ControllerRouter::ControllerRouter(const int epollFileDescriptor,
                                            PowerStateMachine& powerStateMachine,
                                            VirtualKeyboard* virtualKeyboard,
                                            Logger& log)
@@ -88,7 +90,7 @@ ControllerNavigation::ControllerNavigation(const int epollFileDescriptor,
     }
 }
 
-void ControllerNavigation::onReport(const std::span<const uint8_t> report) {
+void ControllerRouter::onReport(const std::span<const uint8_t> report) {
     const auto now = std::chrono::steady_clock::now();
     const bool controllerCameBack = hasReceivedReport_ && now - lastReportTime_ > CONTROLLER_SILENCE_LIMIT;
     hasReceivedReport_ = true;
@@ -103,15 +105,34 @@ void ControllerNavigation::onReport(const std::span<const uint8_t> report) {
         powerStateMachine_.onControllerButtonPressed(/*isTakeOverButton=*/false);
     }
 
-    forEachButton(decoder_.decode(report),
-                  [this](const ControllerButton button) { onButtonPressed(button); });
+    const ControllerButtonSet newlyPressedButtons = decoder_.decode(report);
 
-    if (repeatingButton_ && !(decoder_.pressedButtons() & buttonBit(*repeatingButton_))) {
-        stopRepeating();
+    if (mode_ == ControllerMode::Navigation) {
+        forEachButton(newlyPressedButtons,
+                      [this](const ControllerButton button) { onNavigationButtonPressed(button); });
+        if (repeatingButton_ && !(decoder_.pressedButtons() & buttonBit(*repeatingButton_))) {
+            stopRepeating();
+        }
+        return;
+    }
+
+    // An app has the controller. Presses only matter here if the TV is off or showing another
+    // input: then they bring it back. Never a take-over, so the Steam button stays the app's.
+    if (newlyPressedButtons != 0) {
+        powerStateMachine_.onControllerButtonPressed(/*isTakeOverButton=*/false);
     }
 }
 
-void ControllerNavigation::onButtonPressed(const ControllerButton button) {
+void ControllerRouter::setMode(const ControllerMode mode) {
+    if (mode == mode_) return;
+
+    stopRepeating();
+    decoder_.reset();   // held buttons from the previous mode mean nothing in the new one
+    mode_ = mode;
+    log_.log("Controller: mode {}", controllerModeName(mode_));
+}
+
+void ControllerRouter::onNavigationButtonPressed(const ControllerButton button) {
     const bool isTakeOverButton = button == ControllerButton::Steam;
     if (powerStateMachine_.onControllerButtonPressed(isTakeOverButton)) {
         stopRepeating();   // used for waking or taking over, not navigation
@@ -126,7 +147,7 @@ void ControllerNavigation::onButtonPressed(const ControllerButton button) {
     if (isDirection(button)) startRepeating(button, linuxKeyCode);
 }
 
-bool ControllerNavigation::handleReadyFileDescriptor(const int readyFileDescriptor) {
+bool ControllerRouter::handleReadyFileDescriptor(const int readyFileDescriptor) {
     if (readyFileDescriptor != repeatTimerFileDescriptor_.get()) return false;
     if (!consumeTimerExpiration(readyFileDescriptor) || !repeatingButton_) return true;
 
@@ -139,13 +160,13 @@ bool ControllerNavigation::handleReadyFileDescriptor(const int readyFileDescript
     return true;
 }
 
-void ControllerNavigation::startRepeating(const ControllerButton button, const int linuxKeyCode) {
+void ControllerRouter::startRepeating(const ControllerButton button, const int linuxKeyCode) {
     repeatingButton_ = button;
     repeatingKeyCode_ = linuxKeyCode;
     armTimer(repeatTimerFileDescriptor_.get(), REPEAT_DELAY, REPEAT_INTERVAL);
 }
 
-void ControllerNavigation::stopRepeating() {
+void ControllerRouter::stopRepeating() {
     repeatingButton_.reset();
     disarmTimer(repeatTimerFileDescriptor_.get());
 }

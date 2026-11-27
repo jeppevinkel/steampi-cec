@@ -6,14 +6,18 @@
 
 #include "Timers.h"
 
+#include <utility>
+
 PowerStateMachine::PowerStateMachine(CEC::ICECAdapter* adapter,
                                      const int wakeTimerFileDescriptor,
                                      const int unattendedAppTimerFileDescriptor,
-                                     Logger& log)
+                                     Logger& log,
+                                     CloseRunningApp closeRunningApp)
     : adapter_(adapter),
       wakeTimerFileDescriptor_(wakeTimerFileDescriptor),
       unattendedAppTimerFileDescriptor_(unattendedAppTimerFileDescriptor),
-      log_(log) {}
+      log_(log),
+      closeRunningApp_(std::move(closeRunningApp)) {}
 
 void PowerStateMachine::startUp() {
     const auto tvPowerStatus = adapter_->GetDevicePowerStatus(CEC::CECDEVICE_TV);
@@ -114,6 +118,9 @@ void PowerStateMachine::onCecEvent(const CecEvent event) {
             if (state_ != PowerState::Active) enterActive();
             break;
 
+        case CecEvent::RemoteHeldReturn:
+            break;   // not about power: main.cpp handles it before it gets here
+
         case CecEvent::SelectedOther:
             // Ignored while Waking (the Samsung's boot noise). The tvShowingOurInput_ check makes
             // the duplicate events, and later switches between other inputs, not restart the countdown.
@@ -153,7 +160,7 @@ void PowerStateMachine::enterStandby(const bool sendStandbyToTv) {
         const bool standbySent = adapter_->StandbyDevices(CEC::CECDEVICE_TV);
         log_.log("Standby TV: {}", standbySent ? "ok" : "FAILED");
         disarmTimer(unattendedAppTimerFileDescriptor_);
-        // TODO: end the running app's lease (closes the app).
+        closeRunningApp_("standby was chosen");
     } else {
         // The TV turned itself off (remote, or its own auto power-off): the app may still be wanted.
         armTimer(unattendedAppTimerFileDescriptor_, APP_GRACE_AFTER_TV_STANDBY);
@@ -166,7 +173,7 @@ void PowerStateMachine::enterStandby(const bool sendStandbyToTv) {
 
 void PowerStateMachine::onUnattendedAppTimerExpired() {
     if (tvShowingOurInput_) return;   // they came back in the same epoll batch
-    // TODO: once the lease exists, return early here if no app is running.
-    log_.write("App unattended past its grace period; closing it");
-    // TODO: end the running app's lease. The controller returns to Navigation when the app exits.
+    // Logged by whoever closes it; nothing happens (or is logged) if no app is running.
+    // The controller returns to Navigation when the app has exited.
+    closeRunningApp_("nobody watched it for its whole grace period");
 }

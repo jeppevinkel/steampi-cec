@@ -7,7 +7,10 @@
 #include <deque>
 #include <mutex>
 
-enum class CecEvent { TvStandby, SelectedUs, SelectedOther, TvQueriedDeckStatus };
+enum class CecEvent {
+    TvStandby, SelectedUs, SelectedOther, TvQueriedDeckStatus,
+    RemoteHeldReturn,   // Return held on the TV remote: close the app, or go to the launcher's home
+};
 
 constexpr const char* cecEventName(const CecEvent event) {
     switch (event) {
@@ -15,6 +18,7 @@ constexpr const char* cecEventName(const CecEvent event) {
         case CecEvent::TvQueriedDeckStatus: return "TvQueriedDeckStatus";
         case CecEvent::SelectedUs:          return "SelectedUs";
         case CecEvent::SelectedOther:       return "SelectedOther";
+        case CecEvent::RemoteHeldReturn:    return "RemoteHeldReturn";
     }
     return "Unknown";
 }
