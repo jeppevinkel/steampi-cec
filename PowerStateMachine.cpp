@@ -15,6 +15,18 @@ PowerStateMachine::PowerStateMachine(CEC::ICECAdapter* adapter,
       unattendedAppTimerFileDescriptor_(unattendedAppTimerFileDescriptor),
       log_(log) {}
 
+void PowerStateMachine::startUp() {
+    const auto tvPowerStatus = adapter_->GetDevicePowerStatus(CEC::CECDEVICE_TV);
+    if (tvPowerStatus == CEC::CEC_POWER_STATUS_ON) {
+        // Usually the TV is already showing us (we were restarted, or the Pi rebooted while the
+        // TV stayed on our input). Taking the source makes sure the TV sends us remote keys.
+        requestWake();
+        return;
+    }
+    log_.log("TV power status at startup: {}; staying in standby until woken",
+             adapter_->ToString(tvPowerStatus));
+}
+
 void PowerStateMachine::requestWake() {
     if (state_ == PowerState::Waking) return;
 

@@ -280,10 +280,10 @@ int main() {
     }
     armTimer(uploadTimerFileDescriptor.get(), FIRST_LOG_UPLOAD_DELAY, LOG_UPLOAD_INTERVAL);
 
-    // 5. State machine. For testing we wake on startup; later the controller does this.
+    // 5. State machine. The controller or the TV itself wakes us; startup never turns the TV on.
     PowerStateMachine powerStateMachine(g_adapter, wakeTimerFileDescriptor.get(),
                                         unattendedAppTimerFileDescriptor.get(), g_log);
-    powerStateMachine.requestWake();
+    powerStateMachine.startUp();
 
     // Controller support is optional: if it can't be set up, CEC and the TV remote keep working.
     std::optional<ControllerNavigation> controllerNavigation;
