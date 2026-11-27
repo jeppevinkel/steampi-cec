@@ -255,6 +255,8 @@ write_file /etc/udev/rules.d/60-steampi-input.rules 0644 root <<'EOF'
 # Managed by install-steampi.sh.
 # The CEC daemon (group input) creates the TV remote's virtual keyboard through uinput.
 KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
+# The daemon's virtual Xbox 360 gamepad (while Steam Link runs): readable by the TV session.
+SUBSYSTEM=="input", ATTRS{name}=="SteamPi Steam Controller*", MODE="0660", GROUP="input", TAG+="uaccess"
 # Valve controllers: raw access for the logged-in user, same as Valve's steam-devices rules,
 # so programs using SDL can talk to the Steam Controller directly.
 SUBSYSTEM=="usb", ATTRS{idVendor}=="28de", MODE="0660", GROUP="input", TAG+="uaccess"
