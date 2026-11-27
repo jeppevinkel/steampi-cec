@@ -2,7 +2,7 @@
 // Created by jeppe on 09.10.2026.
 //
 
-#include "ControllerNavigation.h"
+#include "ControllerRouter.h"
 
 #include <cerrno>
 #include <system_error>
@@ -20,6 +20,8 @@ constexpr auto REPEAT_INTERVAL = std::chrono::milliseconds(100);
 // The controller sends ~60 reports per second while on. Silence longer than this means
 // it turned off, so held buttons from before are meaningless.
 constexpr auto CONTROLLER_SILENCE_LIMIT = std::chrono::milliseconds(500);
+// While an app has the virtual gamepad: how often to check that the controller is still there.
+constexpr auto GAMEPAD_SILENCE_CHECK_INTERVAL = std::chrono::milliseconds(250);
 
 int linuxKeyForControllerButton(const ControllerButton button) {
     switch (button) {
@@ -60,6 +62,8 @@ const char* controllerButtonName(const ControllerButton button) {
         case ControllerButton::Steam:       return "Steam";
         case ControllerButton::LeftBumper:  return "LeftBumper";
         case ControllerButton::RightBumper: return "RightBumper";
+        case ControllerButton::LeftStickClick:  return "LeftStickClick";
+        case ControllerButton::RightStickClick: return "RightStickClick";
         case ControllerButton::DPadUp:      return "DPadUp";
         case ControllerButton::DPadDown:    return "DPadDown";
         case ControllerButton::DPadLeft:    return "DPadLeft";
@@ -74,21 +78,21 @@ const char* controllerButtonName(const ControllerButton button) {
 
 }  // namespace
 
-ControllerNavigation::ControllerNavigation(const int epollFileDescriptor,
+ControllerRouter::ControllerRouter(const int epollFileDescriptor,
                                            PowerStateMachine& powerStateMachine,
                                            VirtualKeyboard* virtualKeyboard,
                                            Logger& log)
     : powerStateMachine_(powerStateMachine),
       virtualKeyboard_(virtualKeyboard),
       log_(log),
-      repeatTimerFileDescriptor_(timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC)) {
-    if (!repeatTimerFileDescriptor_.isValid()
-        || !watchForInput(epollFileDescriptor, repeatTimerFileDescriptor_.get())) {
-        throw std::system_error(errno, std::generic_category(), "controller repeat timer");
+      timerFileDescriptor_(timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC)) {
+    if (!timerFileDescriptor_.isValid()
+        || !watchForInput(epollFileDescriptor, timerFileDescriptor_.get())) {
+        throw std::system_error(errno, std::generic_category(), "controller timer");
     }
 }
 
-void ControllerNavigation::onReport(const std::span<const uint8_t> report) {
+void ControllerRouter::onReport(const std::span<const uint8_t> report) {
     const auto now = std::chrono::steady_clock::now();
     const bool controllerCameBack = hasReceivedReport_ && now - lastReportTime_ > CONTROLLER_SILENCE_LIMIT;
     hasReceivedReport_ = true;
@@ -98,20 +102,59 @@ void ControllerNavigation::onReport(const std::span<const uint8_t> report) {
         // Turning the controller on counts as a press: it wakes the TV from standby, or takes
         // it back from another input. The press that turned it on may never appear in a report.
         decoder_.reset();
-        stopRepeating();
+        if (mode_ == ControllerMode::Navigation) stopRepeating();
         log_.write("Controller: turned on");
         powerStateMachine_.onControllerButtonPressed(/*isTakeOverButton=*/false);
     }
 
-    forEachButton(decoder_.decode(report),
-                  [this](const ControllerButton button) { onButtonPressed(button); });
+    const ControllerButtonSet newlyPressedButtons = decoder_.decode(report);
 
-    if (repeatingButton_ && !(decoder_.pressedButtons() & buttonBit(*repeatingButton_))) {
-        stopRepeating();
+    if (mode_ == ControllerMode::Navigation) {
+        forEachButton(newlyPressedButtons,
+                      [this](const ControllerButton button) { onNavigationButtonPressed(button); });
+        if (repeatingButton_ && !(decoder_.pressedButtons() & buttonBit(*repeatingButton_))) {
+            stopRepeating();
+        }
+        return;
+    }
+
+    if (mode_ == ControllerMode::VirtualGamepad && virtualGamepad_) {
+        if (const auto state = SteamControllerDecoder::readState(report)) {
+            virtualGamepad_->update(*state);
+            virtualGamepadNeutral_ = false;
+        }
+    }
+
+    // An app has the controller. Presses only matter here if the TV is off or showing another
+    // input: then they bring it back. Never a take-over, so the Steam button stays the app's.
+    if (newlyPressedButtons != 0) {
+        powerStateMachine_.onControllerButtonPressed(/*isTakeOverButton=*/false);
     }
 }
 
-void ControllerNavigation::onButtonPressed(const ControllerButton button) {
+void ControllerRouter::setMode(const ControllerMode mode) {
+    if (mode == mode_) return;
+
+    stopRepeating();
+    decoder_.reset();   // held buttons from the previous mode mean nothing in the new one
+    virtualGamepad_.reset();
+    mode_ = mode;
+
+    if (mode_ == ControllerMode::VirtualGamepad) {
+        try {
+            virtualGamepad_.emplace();
+            virtualGamepadNeutral_ = true;
+            armTimer(timerFileDescriptor_.get(), GAMEPAD_SILENCE_CHECK_INTERVAL, GAMEPAD_SILENCE_CHECK_INTERVAL);
+        } catch (const std::system_error& error) {
+            log_.log("Controller: virtual gamepad unavailable ({}); releasing the controller instead",
+                     error.what());
+            mode_ = ControllerMode::Released;
+        }
+    }
+    log_.log("Controller: mode {}", controllerModeName(mode_));
+}
+
+void ControllerRouter::onNavigationButtonPressed(const ControllerButton button) {
     const bool isTakeOverButton = button == ControllerButton::Steam;
     if (powerStateMachine_.onControllerButtonPressed(isTakeOverButton)) {
         stopRepeating();   // used for waking or taking over, not navigation
@@ -126,9 +169,14 @@ void ControllerNavigation::onButtonPressed(const ControllerButton button) {
     if (isDirection(button)) startRepeating(button, linuxKeyCode);
 }
 
-bool ControllerNavigation::handleReadyFileDescriptor(const int readyFileDescriptor) {
-    if (readyFileDescriptor != repeatTimerFileDescriptor_.get()) return false;
-    if (!consumeTimerExpiration(readyFileDescriptor) || !repeatingButton_) return true;
+bool ControllerRouter::handleReadyFileDescriptor(const int readyFileDescriptor) {
+    if (readyFileDescriptor != timerFileDescriptor_.get()) return false;
+    if (!consumeTimerExpiration(readyFileDescriptor)) return true;
+    if (mode_ == ControllerMode::VirtualGamepad) {
+        onGamepadSilenceCheck();
+        return true;
+    }
+    if (!repeatingButton_) return true;
 
     // Reports stopped while a direction was held (controller turned off): don't repeat forever.
     if (std::chrono::steady_clock::now() - lastReportTime_ > CONTROLLER_SILENCE_LIMIT) {
@@ -139,13 +187,23 @@ bool ControllerNavigation::handleReadyFileDescriptor(const int readyFileDescript
     return true;
 }
 
-void ControllerNavigation::startRepeating(const ControllerButton button, const int linuxKeyCode) {
-    repeatingButton_ = button;
-    repeatingKeyCode_ = linuxKeyCode;
-    armTimer(repeatTimerFileDescriptor_.get(), REPEAT_DELAY, REPEAT_INTERVAL);
+// The controller went quiet (turned off, out of range, puck unplugged) while an app has the
+// virtual gamepad: let go of everything, so a held stick or trigger doesn't stay held in the game.
+void ControllerRouter::onGamepadSilenceCheck() {
+    if (virtualGamepadNeutral_ || !virtualGamepad_) return;
+    if (std::chrono::steady_clock::now() - lastReportTime_ <= CONTROLLER_SILENCE_LIMIT) return;
+    virtualGamepad_->update(ControllerState{});
+    virtualGamepadNeutral_ = true;
+    log_.write("Controller: silent; virtual gamepad released all buttons");
 }
 
-void ControllerNavigation::stopRepeating() {
+void ControllerRouter::startRepeating(const ControllerButton button, const int linuxKeyCode) {
+    repeatingButton_ = button;
+    repeatingKeyCode_ = linuxKeyCode;
+    armTimer(timerFileDescriptor_.get(), REPEAT_DELAY, REPEAT_INTERVAL);
+}
+
+void ControllerRouter::stopRepeating() {
     repeatingButton_.reset();
-    disarmTimer(repeatTimerFileDescriptor_.get());
+    disarmTimer(timerFileDescriptor_.get());
 }

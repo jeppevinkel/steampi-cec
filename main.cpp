@@ -21,8 +21,10 @@
 #include <span>
 #include <linux/input-event-codes.h>
 
+#include "AppLaunchClient.h"
 #include "CecEventQueue.h"
-#include "ControllerNavigation.h"
+#include "ControllerRouter.h"
+#include "ControlServer.h"
 #include "EventLoop.h"
 #include "FileDescriptor.h"
 #include "Logger.h"
@@ -130,7 +132,6 @@ static int linuxKeyForCecKey(const CEC::cec_user_control_code cecKey) {
         case CEC::CEC_USER_CONTROL_CODE_RIGHT:  return KEY_RIGHT;
         case CEC::CEC_USER_CONTROL_CODE_SELECT: return KEY_ENTER;
         case CEC::CEC_USER_CONTROL_CODE_EXIT:   return KEY_BACKSPACE;
-        case CEC::CEC_USER_CONTROL_CODE_CLEAR:  return KEY_HOME;
         default:                                return KEY_RESERVED;
     }
 }
@@ -139,6 +140,14 @@ static int linuxKeyForCecKey(const CEC::cec_user_control_code cecKey) {
 static void onKeyPress(void*, const CEC::cec_keypress* keyPress) {
     // libcec reports each key twice: on press (duration 0) and on release (how long it was held).
     if (keyPress->duration != 0) return;
+
+    // Our Samsung sends "clear" when Return is held. Whether that closes the running app or goes
+    // to the launcher's home menu is decided on the main thread, which knows about apps.
+    if (keyPress->keycode == CEC::CEC_USER_CONTROL_CODE_CLEAR) {
+        g_log.write("Remote key: clear (Return held)");
+        g_cecEventQueue.push(CecEvent::RemoteHeldReturn);
+        return;
+    }
 
     const int linuxKeyCode = linuxKeyForCecKey(keyPress->keycode);
     g_log.log("Remote key: {} -> {}", g_adapter->ToString(keyPress->keycode),
@@ -180,9 +189,28 @@ static void closeLogAndUploadRemainder(LogUploader& logUploader) {
     }
 }
 
+// Return held on the TV remote: like on the TV itself, it closes the running app.
+// Without an app, it takes the launcher back to its main menu.
+static void handleRemoteHeldReturn(std::optional<ControlServer>& controlServer) {
+    if (controlServer && controlServer->closeRunningApp("Return was held on the TV remote")) return;
+    if (g_virtualKeyboard) g_virtualKeyboard->tap(KEY_HOME);
+}
+
+static int runCommandLine(const int argumentCount, char* arguments[]) {
+    const std::string_view option = arguments[1];
+    if (option == "--launch" && argumentCount == 3) return runAppLaunchClient(arguments[2]);
+
+    std::cerr << "Usage:\n"
+                 "  steampi-cec                    run the daemon (normally started by systemd)\n"
+                 "  steampi-cec --launch <app>     start an app through the daemon (used by Flex Launcher)\n";
+    return 2;
+}
+
 // ---------- main ----------
 
-int main() {
+int main(const int argumentCount, char* arguments[]) {
+    if (argumentCount > 1) return runCommandLine(argumentCount, arguments);
+
     // 1. Block termination signals FIRST, before libcec creates any threads,
     //    so every thread inherits the mask and signals arrive only via signalfd.
     sigset_t terminationSignals;
@@ -280,28 +308,58 @@ int main() {
     }
     armTimer(uploadTimerFileDescriptor.get(), FIRST_LOG_UPLOAD_DELAY, LOG_UPLOAD_INTERVAL);
 
-    // 5. State machine. The controller or the TV itself wakes us; startup never turns the TV on.
+    // 5. Controller and app objects. Declared before they're created, because they refer to
+    //    each other: an app's lease decides who gets the controller, and the power state
+    //    machine (created in between) closes apps nobody is watching.
+    std::optional<ControllerRouter> controllerRouter;
+    std::optional<SteamControllerPuck> steamControllerPuck;
+    std::optional<ControlServer> controlServer;
+
+    const auto applyControllerMode = [&controllerRouter, &steamControllerPuck](const ControllerMode mode) {
+        if (!controllerRouter) return;
+        controllerRouter->setMode(mode);   // may fall back to Released
+        if (steamControllerPuck) {
+            steamControllerPuck->setLizardModeGrabbed(controllerRouter->mode() != ControllerMode::Released);
+        }
+    };
+
+    // App launching is optional too: without it, Flex Launcher's tiles still start the apps.
+    try {
+        controlServer.emplace(epollFileDescriptor.get(), g_log, ControlServer::Callbacks{
+            .leaseStarted = [&applyControllerMode](const AppProfile& profile) {
+                applyControllerMode(profile.controllerMode);
+            },
+            .leaseEnded = [&applyControllerMode](const AppProfile&) {
+                applyControllerMode(ControllerMode::Navigation);
+            },
+        });
+    } catch (const std::system_error& error) {
+        g_log.log("App launching through the daemon disabled: {}", error.what());
+    }
+
+    // 6. State machine. The controller or the TV itself wakes us; startup never turns the TV on.
     PowerStateMachine powerStateMachine(g_adapter, wakeTimerFileDescriptor.get(),
-                                        unattendedAppTimerFileDescriptor.get(), g_log);
+                                        unattendedAppTimerFileDescriptor.get(), g_log,
+        [&controlServer](const std::string_view reason) {
+            return controlServer && controlServer->closeRunningApp(reason);
+        });
     powerStateMachine.startUp();
 
     // Controller support is optional: if it can't be set up, CEC and the TV remote keep working.
-    std::optional<ControllerNavigation> controllerNavigation;
-    std::optional<SteamControllerPuck> steamControllerPuck;
     try {
-        controllerNavigation.emplace(epollFileDescriptor.get(), powerStateMachine,
-                                     g_virtualKeyboard.get(), g_log);
+        controllerRouter.emplace(epollFileDescriptor.get(), powerStateMachine,
+                                 g_virtualKeyboard.get(), g_log);
         steamControllerPuck.emplace(epollFileDescriptor.get(), g_log,
-            [&controllerNavigation](const std::span<const uint8_t> report) {
-                controllerNavigation->onReport(report);
+            [&controllerRouter](const std::span<const uint8_t> report) {
+                controllerRouter->onReport(report);
             });
     } catch (const std::system_error& error) {
         g_log.log("Controller support disabled: {}", error.what());
         steamControllerPuck.reset();
-        controllerNavigation.reset();
+        controllerRouter.reset();
     }
 
-    // 6. Event loop: sleeps in the kernel until something is ready.
+    // 7. Event loop: sleeps in the kernel until something is ready.
     int exitCode = 0;
     try {
         bool running = true;
@@ -344,14 +402,21 @@ int main() {
 
                 } else if (readyFileDescriptor == g_cecEventQueue.notificationFileDescriptor()) {
                     for (const CecEvent event : g_cecEventQueue.takeAll()) {
+                        if (event == CecEvent::RemoteHeldReturn) {
+                            handleRemoteHeldReturn(controlServer);
+                            continue;
+                        }
                         powerStateMachine.onCecEvent(event);   // main thread: safe to call libcec
                     }
                 } else if (steamControllerPuck
                            && steamControllerPuck->handleReadyFileDescriptor(readyFileDescriptor)) {
                     // Controller reports, or a rescan for the puck: handled inside.
-                } else if (controllerNavigation
-                           && controllerNavigation->handleReadyFileDescriptor(readyFileDescriptor)) {
+                } else if (controllerRouter
+                           && controllerRouter->handleReadyFileDescriptor(readyFileDescriptor)) {
                     // Key repeat for a held direction: handled inside.
+                } else if (controlServer
+                           && controlServer->handleReadyFileDescriptor(readyFileDescriptor)) {
+                    // Launch clients: leases, app output, exits. Handled inside.
                 }
             }
         }
@@ -360,7 +425,8 @@ int main() {
         exitCode = 6;   // non-zero, so systemd restarts the daemon
     }
 
-    // 7. Shutdown. The TV is deliberately left alone: restarts shouldn't blank the screen.
+    // 8. Shutdown. The TV is deliberately left alone: restarts shouldn't blank the screen.
+    //    A running app keeps running: its launch client reconnects to the next daemon.
     closeCecAdapter();
     g_virtualKeyboard.reset();
     closeLogAndUploadRemainder(logUploader);

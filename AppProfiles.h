@@ -1,0 +1,31 @@
+#pragma once
+
+#include <string_view>
+
+#include "ControllerMode.h"
+
+// An app that Flex Launcher starts through the daemon (steampi-cec --launch <name>).
+struct AppProfile {
+    std::string_view name;
+    // Run with /bin/sh -c inside the TV session, so the app gets the session's environment.
+    std::string_view command;
+    ControllerMode controllerMode;
+    // Send the app's output to the daemon's log, and with it to ntfy.
+    bool forwardOutput;
+};
+
+inline constexpr AppProfile APP_PROFILES[] = {
+    // Steam Link's SDL3 doesn't know the 2026 controller, so it gets a virtual Xbox 360 gamepad.
+    {"steamlink", "exec /usr/bin/steamlink", ControllerMode::VirtualGamepad, true},
+    {"test-pattern",
+     "exec mpv --fullscreen --no-osc --no-input-default-bindings"
+     " 'av://lavfi:testsrc=duration=5:size=1920x1080:rate=30'",
+     ControllerMode::Navigation, true},
+};
+
+inline const AppProfile* findAppProfile(const std::string_view name) {
+    for (const AppProfile& profile : APP_PROFILES) {
+        if (profile.name == name) return &profile;
+    }
+    return nullptr;
+}

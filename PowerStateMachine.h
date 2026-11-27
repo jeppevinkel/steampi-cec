@@ -5,6 +5,8 @@
 #pragma once
 
 #include <chrono>
+#include <functional>
+#include <string_view>
 #include <libcec/cec.h>
 
 #include "CecEventQueue.h"
@@ -15,8 +17,11 @@ enum class PowerState { Standby, Waking, Active };
 // All methods must be called from the main (epoll) thread only.
 class PowerStateMachine {
 public:
+    // Asks the running app (if any) to close; returns false if no app is running.
+    using CloseRunningApp = std::function<bool(std::string_view reason)>;
+
     PowerStateMachine(CEC::ICECAdapter* adapter, int wakeTimerFileDescriptor,
-                      int unattendedAppTimerFileDescriptor, Logger& log);
+                      int unattendedAppTimerFileDescriptor, Logger& log, CloseRunningApp closeRunningApp);
 
     // Called once after the CEC adapter is open. Never turns the TV on: an update or reboot at
     // night shouldn't light up the living room. If the TV is already on, we take the source.
@@ -48,6 +53,7 @@ private:
     int wakeTimerFileDescriptor_;
     int unattendedAppTimerFileDescriptor_;
     Logger& log_;
+    CloseRunningApp closeRunningApp_;
     PowerState state_ = PowerState::Standby;
     int activeSourceAttempts_ = 0;
     bool tvShowingOurInput_ = false;
