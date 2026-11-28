@@ -199,6 +199,11 @@ write_file "${target_home}/.xinitrc" 0755 "${TARGET_USER}" <<'EOF'
 # Disable X's own blanking; the daemon and CEC decide when the screen matters.
 xset s off -dpms s noblank
 
+# 1080p at 60 Hz; the TV upscales. The TV offers 4K only at 30 Hz, which capped Steam Link and
+# 60 fps video at 30, and drawing 4K is the Pi 5's bottleneck even when video is decoded in hardware.
+output="$(xrandr --query | awk '/ connected/ { print $1; exit }')"
+[ -n "$output" ] && xrandr --output "$output" --mode 1920x1080 --rate 60
+
 if [ -f "$HOME/background.mkv" ]; then
     # Compositor, needed for the transparent launcher over the video.
     # --unredir-if-possible turns compositing off under fullscreen apps (Steam Link).
