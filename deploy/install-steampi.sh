@@ -20,6 +20,8 @@ readonly TARGET_USER="jeppe"
 readonly FLEX_LAUNCHER_URL="https://github.com/complexlogic/flex-launcher/releases/download/v2.2/flex-launcher_2.2_arm64.deb"
 # Built by this repository's jellyfin-desktop workflow; upstream has no ARM Linux build.
 readonly JELLYFIN_DESKTOP_URL="https://github.com/jeppevinkel/steampi-cec/releases/download/jellyfin-desktop/jellyfin-desktop_arm64.deb"
+# Trixie's libmpv2 with a fix for a leak that stops Jellyfin Desktop drawing after ~5 minutes of video.
+readonly PATCHED_LIBMPV_URL="https://github.com/jeppevinkel/steampi-cec/releases/download/jellyfin-desktop/libmpv2_arm64.deb"
 readonly JELLYFIN_DESKTOP_PROFILE="steampi"
 # The server's local address: plain HTTP on the home network. Its HTTPS port has a Cloudflare
 # origin certificate, which only Cloudflare's proxy trusts.
@@ -164,12 +166,15 @@ fi
 # ---------- Jellyfin Desktop ----------
 log_step "Installing Jellyfin Desktop"
 jellyfin_desktop_package="${working_directory}/jellyfin-desktop_arm64.deb"
+patched_libmpv_package="${working_directory}/libmpv2_arm64.deb"
 if curl --fail --location --silent --show-error --retry 3 \
-        --output "${jellyfin_desktop_package}" "${JELLYFIN_DESKTOP_URL}"; then
-    apt-get install -y --no-install-recommends "${jellyfin_desktop_package}"
+        --output "${jellyfin_desktop_package}" "${JELLYFIN_DESKTOP_URL}" \
+   && curl --fail --location --silent --show-error --retry 3 \
+        --output "${patched_libmpv_package}" "${PATCHED_LIBMPV_URL}"; then
+    apt-get install -y --no-install-recommends "${patched_libmpv_package}" "${jellyfin_desktop_package}"
 else
     # Right after a merge the workflow may not have published the package yet.
-    echo "    WARNING    Jellyfin Desktop package not available yet; skipped (run pitv-update later)"
+    echo "    WARNING    Jellyfin Desktop packages not available yet; skipped (run pitv-update later)"
 fi
 
 if command -v jellyfin-desktop > /dev/null; then
