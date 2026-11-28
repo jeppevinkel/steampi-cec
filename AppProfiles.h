@@ -11,7 +11,7 @@ struct AppProfile {
     // Run with /bin/sh -c inside the TV session, so the app gets the session's environment.
     std::string_view command;
     ControllerMode controllerMode;
-    // Send the app's output to the daemon's log, and with it to ntfy.
+    // Send the app's output to the daemon's log.
     bool forwardOutput;
     // The key the TV remote's Return and the controller's B send while the app runs.
     int backKeyCode = KEY_BACKSPACE;

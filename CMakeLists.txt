@@ -18,8 +18,6 @@ add_executable(steampi_cec main.cpp
         PhysicalAddress.h
         PowerStateMachine.cpp
         PowerStateMachine.h
-        LogUploader.cpp
-        LogUploader.h
         SteamControllerDecoder.cpp
         SteamControllerDecoder.h
         VirtualKeyboard.cpp

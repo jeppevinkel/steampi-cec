@@ -5,7 +5,7 @@
 # The longer power-saving measurement (off vs on, about 3 minutes) is in git history:
 #   git show d81b177:deploy/diagnostics.sh
 #
-# The ntfy topic is public, so the network name (SSID) and the router's MAC address are left out:
+# The network name (SSID) and the router's MAC address are left out, in case the output is shared:
 # a router's MAC address can be looked up in public Wi-Fi maps.
 
 readonly PING_COUNT=50   # 0.2 s apart: 10 seconds

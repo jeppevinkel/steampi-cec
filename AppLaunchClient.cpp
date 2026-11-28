@@ -36,7 +36,7 @@ namespace {
     constexpr auto TERMINATION_GRACE_PERIOD = std::chrono::seconds(5);
     // Only if pidfd_open isn't available: how often to check whether the app has exited.
     constexpr auto EXIT_CHECK_INTERVAL = std::chrono::milliseconds(250);
-    // Keeps a chatty app from flooding the daemon's log (and the ntfy uploads).
+    // Keeps a chatty app from flooding the daemon's log.
     constexpr std::size_t MAXIMUM_FORWARDED_LINES = 5000;
     constexpr std::size_t MAXIMUM_FORWARDED_LINE_LENGTH = 1000;
     // App output waiting to be sent while the daemon is busy. Beyond this, output lines are

@@ -28,7 +28,6 @@
 #include "EventLoop.h"
 #include "FileDescriptor.h"
 #include "Logger.h"
-#include "LogUploader.h"
 #include "PhysicalAddress.h"
 #include "PowerStateMachine.h"
 #include "SteamControllerPuck.h"
@@ -37,10 +36,9 @@
 
 static constexpr auto DEVICE_NAME = "PiTV";
 static constexpr auto LOG_PATH     = "/home/jeppe/cec.log";
-static constexpr auto LOG_UPLOAD_CHUNK_PATH = "/home/jeppe/cec-upload-chunk.log";
-static constexpr auto NTFY_TOPIC = "pitv-cec-jeppe";
-static constexpr auto FIRST_LOG_UPLOAD_DELAY = std::chrono::seconds(10);
-static constexpr auto LOG_UPLOAD_INTERVAL = std::chrono::seconds(60);
+// The log starts empty on every start; the previous run's log is kept here, so a crash survives
+// the automatic restart that follows it.
+static constexpr auto PREVIOUS_LOG_PATH = "/home/jeppe/cec.log.previous";
 static constexpr int MAXIMUM_ADAPTERS = 4;
 static constexpr int MAXIMUM_EVENTS_PER_WAIT = 8;
 static constexpr int VIRTUAL_KEYBOARD_KEY_CODES[] = {
@@ -169,29 +167,6 @@ static void closeCecAdapter() {
     g_log.write("Adapter closed");
 }
 
-// Successful uploads are deliberately NOT logged: that line would itself be new
-// content and trigger another upload every interval, forever.
-static void uploadNewLogContent(LogUploader& logUploader) {
-    if (const auto exitCode = logUploader.reapFinishedUpload(); exitCode && *exitCode != 0) {
-        g_log.log("Log upload failed with exit code {} (will retry)", *exitCode);
-    }
-    if (logUploader.startUploadOfNewContent() == LogUploader::StartResult::Failed) {
-        g_log.write("Log upload could not be started");
-    }
-}
-
-// Used on every exit path, so failures during startup get uploaded too.
-static void closeLogAndUploadRemainder(LogUploader& logUploader) {
-    if (const auto exitCode = logUploader.waitForPendingUpload(); exitCode && *exitCode != 0) {
-        g_log.log("Log upload failed with exit code {}", *exitCode);
-    }
-    g_log.close();   // everything is on disk now
-    if (logUploader.startUploadOfNewContent() == LogUploader::StartResult::Started) {
-        const int exitCode = logUploader.waitForPendingUpload().value_or(-1);
-        std::cout << "Final log upload exited with code " << exitCode << std::endl;
-    }
-}
-
 // Return held on the TV remote, or B held on the controller: like on the TV itself, it closes
 // the running app. Without an app, it takes the launcher back to its main menu.
 static void handleBackHeld(std::optional<ControlServer>& controlServer, const std::string_view reason) {
@@ -222,11 +197,11 @@ int main(const int argumentCount, char* arguments[]) {
     sigaddset(&terminationSignals, SIGTERM);
     pthread_sigmask(SIG_BLOCK, &terminationSignals, nullptr);
 
+    std::rename(LOG_PATH, PREVIOUS_LOG_PATH);   // fails harmlessly on the very first start
     if (!g_log.open(LOG_PATH)) {
         std::cerr << "Could not open log file\n";
         return 3;
     }
-    LogUploader logUploader(LOG_PATH, LOG_UPLOAD_CHUNK_PATH, NTFY_TOPIC);
 
     // 2. Event sources for the loop.
     FileDescriptor signalFileDescriptor(
@@ -235,15 +210,12 @@ int main(const int argumentCount, char* arguments[]) {
         timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC));
     FileDescriptor unattendedAppTimerFileDescriptor(
         timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC));
-    FileDescriptor uploadTimerFileDescriptor(
-        timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC));
     FileDescriptor epollFileDescriptor(epoll_create1(EPOLL_CLOEXEC));
 
     if (!signalFileDescriptor.isValid() || !wakeTimerFileDescriptor.isValid()
-        || !unattendedAppTimerFileDescriptor.isValid() || !uploadTimerFileDescriptor.isValid()
-        || !epollFileDescriptor.isValid()) {
+        || !unattendedAppTimerFileDescriptor.isValid() || !epollFileDescriptor.isValid()) {
         g_log.log("Failed to create event file descriptors: {}", std::strerror(errno));
-        closeLogAndUploadRemainder(logUploader);
+        g_log.close();
         return 4;
     }
 
@@ -272,7 +244,7 @@ int main(const int argumentCount, char* arguments[]) {
     g_adapter = LibCecInitialise(&configuration);
     if (!g_adapter) {
         g_log.write("LibCecInitialise failed");
-        closeLogAndUploadRemainder(logUploader);
+        g_log.close();
         return 1;
     }
 
@@ -287,7 +259,7 @@ int main(const int argumentCount, char* arguments[]) {
     if (adapterCount <= 0 || !g_adapter->Open(adapterDescriptors[0].strComName)) {
         g_log.write("Failed to detect/open adapter");
         UnloadLibCec(g_adapter);
-        closeLogAndUploadRemainder(logUploader);
+        g_log.close();
         return 2;
     }
 
@@ -301,15 +273,13 @@ int main(const int argumentCount, char* arguments[]) {
     if (!watchForInput(epollFileDescriptor.get(), signalFileDescriptor.get())
         || !watchForInput(epollFileDescriptor.get(), wakeTimerFileDescriptor.get())
         || !watchForInput(epollFileDescriptor.get(), unattendedAppTimerFileDescriptor.get())
-        || !watchForInput(epollFileDescriptor.get(), uploadTimerFileDescriptor.get())
         || !watchForInput(epollFileDescriptor.get(), g_cecEventQueue.notificationFileDescriptor())) {
         g_log.log("epoll_ctl failed: {}", std::strerror(errno));
         closeCecAdapter();
         g_virtualKeyboard.reset();
-        closeLogAndUploadRemainder(logUploader);
+        g_log.close();
         return 5;
     }
-    armTimer(uploadTimerFileDescriptor.get(), FIRST_LOG_UPLOAD_DELAY, LOG_UPLOAD_INTERVAL);
 
     // 5. Controller and app objects. Declared before they're created, because they refer to
     //    each other: an app's lease decides who gets the controller, and the power state
@@ -406,10 +376,6 @@ int main(const int argumentCount, char* arguments[]) {
                         powerStateMachine.onUnattendedAppTimerExpired();
                     }
 
-                } else if (readyFileDescriptor == uploadTimerFileDescriptor.get()) {
-                    consumeTimerExpiration(readyFileDescriptor);
-                    uploadNewLogContent(logUploader);
-
                 } else if (readyFileDescriptor == g_cecEventQueue.notificationFileDescriptor()) {
                     for (const CecEvent event : g_cecEventQueue.takeAll()) {
                         if (event == CecEvent::RemoteHeldReturn) {
@@ -439,6 +405,6 @@ int main(const int argumentCount, char* arguments[]) {
     //    A running app keeps running: its launch client reconnects to the next daemon.
     closeCecAdapter();
     g_virtualKeyboard.reset();
-    closeLogAndUploadRemainder(logUploader);
+    g_log.close();
     return exitCode;
 }
