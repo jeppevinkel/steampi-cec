@@ -10,6 +10,9 @@
 
 readonly PING_COUNT=50   # 0.2 s apart: 10 seconds
 
+# iw lives in /usr/sbin, which isn't on a normal user's PATH everywhere (e.g. over SSH).
+export PATH="${PATH}:/usr/sbin:/sbin"
+
 section() {
     printf '\n===== %s =====\n' "$1"
 }
