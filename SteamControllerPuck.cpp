@@ -196,6 +196,7 @@ void SteamControllerPuck::refresh() {
     }
     failureStreakLogged_ = false;   // the state line above already shows what's open now
     retryDelay_ = FIRST_RETRY_DELAY;
+    if (udevMonitor_) disarmTimer(retryTimerFileDescriptor_.get());   // nothing left to retry
 }
 
 int SteamControllerPuck::openNewSlotInterfaces() {
@@ -204,6 +205,7 @@ int SteamControllerPuck::openNewSlotInterfaces() {
         const std::string ueventText = readTextFile(hidrawEntry / "device" / "uevent");
         if (ueventText.find(PUCK_HID_ID) == std::string::npos) continue;
         if (!isSlotInterface(interfaceNameFromUevent(ueventText))) continue;
+        if (!isSetUpByUdev(hidrawEntry)) continue;   // its own udev event follows
 
         const std::filesystem::path devicePath = deviceDirectories_.devices / hidrawEntry.filename();
         if (std::ranges::find(slotInterfaces_, devicePath, &OpenDevice::devicePath) != slotInterfaces_.end()) continue;
@@ -231,6 +233,9 @@ int SteamControllerPuck::grabNewLizardModeInputs() {
         if (!inputName.starts_with("event")) continue;
         if (readFirstLine(inputEntry / "device" / "id" / "vendor") != PUCK_VENDOR_ID) continue;
         if (readFirstLine(inputEntry / "device" / "id" / "product") != PUCK_PRODUCT_ID) continue;
+        // udev announces the parent input device first; its event node is often still being set up
+        // (no permissions yet) at that moment. The node's own udev event follows.
+        if (!isSetUpByUdev(inputEntry)) continue;
 
         const std::filesystem::path devicePath = deviceDirectories_.devices / "input" / inputName;
         if (std::ranges::find(grabbedInputs_, devicePath, &OpenDevice::devicePath) != grabbedInputs_.end()) continue;
@@ -245,6 +250,18 @@ int SteamControllerPuck::grabNewLizardModeInputs() {
         grabbedInputs_.push_back({devicePath, std::move(inputFileDescriptor)});
     }
     return failureCount;
+}
+
+bool SteamControllerPuck::isSetUpByUdev(const std::filesystem::path& sysfsEntry) const {
+    if (!udev_) return true;   // no udev: nothing to wait for
+    std::error_code pathError;
+    const std::filesystem::path devicePath = std::filesystem::canonical(sysfsEntry, pathError);
+    if (pathError) return false;   // gone in the meantime
+    udev_device* device = udev_device_new_from_syspath(udev_.get(), devicePath.c_str());
+    if (!device) return false;
+    const bool isSetUp = udev_device_get_is_initialized(device) > 0;
+    udev_device_unref(device);
+    return isSetUp;
 }
 
 void SteamControllerPuck::reportFailure(const std::filesystem::path& devicePath, const char* operation,

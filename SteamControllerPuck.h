@@ -68,6 +68,9 @@ private:
     // Both return the number of puck devices that couldn't be opened or grabbed.
     int openNewSlotInterfaces();
     int grabNewLizardModeInputs();
+    // Whether udev has finished setting the device up (permissions included). Always true
+    // without udev.
+    [[nodiscard]] bool isSetUpByUdev(const std::filesystem::path& sysfsEntry) const;
     void reportFailure(const std::filesystem::path& devicePath, const char* operation, int errorNumber);
     void closeDevice(const std::filesystem::path& devicePath);
     void closeSlotInterface(int slotFileDescriptor, const char* reason);
