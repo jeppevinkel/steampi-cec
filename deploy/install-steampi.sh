@@ -18,6 +18,14 @@ trap 'echo "FAILED at line ${LINENO}: ${BASH_COMMAND}" >&2' ERR
 
 readonly TARGET_USER="jeppe"
 readonly FLEX_LAUNCHER_URL="https://github.com/complexlogic/flex-launcher/releases/download/v2.2/flex-launcher_2.2_arm64.deb"
+# Built by this repository's jellyfin-desktop workflow; upstream has no ARM Linux build.
+readonly JELLYFIN_DESKTOP_URL="https://github.com/jeppevinkel/steampi-cec/releases/download/jellyfin-desktop/jellyfin-desktop_arm64.deb"
+# Trixie's libmpv2 with a fix for a leak that stops Jellyfin Desktop drawing after ~5 minutes of video.
+readonly PATCHED_LIBMPV_URL="https://github.com/jeppevinkel/steampi-cec/releases/download/jellyfin-desktop/libmpv2_arm64.deb"
+readonly JELLYFIN_DESKTOP_PROFILE="steampi"
+# The server's local address: plain HTTP on the home network. Its HTTPS port has a Cloudflare
+# origin certificate, which only Cloudflare's proxy trusts.
+readonly JELLYFIN_SERVER_URL="http://192.168.0.220:8096"
 readonly PACKAGES=(
     xserver-xorg-core xserver-xorg-input-libinput xinit x11-xserver-utils
     openbox picom mpv steamlink curl
@@ -153,6 +161,71 @@ if [[ -f "${script_directory}/background.mkv" ]]; then
     log_step "Installing background video"
     install_staged_file "${script_directory}/background.mkv" \
         "${target_home}/background.mkv" 0644 "${TARGET_USER}"
+fi
+
+# ---------- Jellyfin Desktop ----------
+log_step "Installing Jellyfin Desktop"
+jellyfin_desktop_package="${working_directory}/jellyfin-desktop_arm64.deb"
+patched_libmpv_package="${working_directory}/libmpv2_arm64.deb"
+if curl --fail --location --silent --show-error --retry 3 \
+        --output "${jellyfin_desktop_package}" "${JELLYFIN_DESKTOP_URL}" \
+   && curl --fail --location --silent --show-error --retry 3 \
+        --output "${patched_libmpv_package}" "${PATCHED_LIBMPV_URL}"; then
+    apt-get install -y --no-install-recommends "${patched_libmpv_package}" "${jellyfin_desktop_package}"
+else
+    # Right after a merge the workflow may not have published the package yet.
+    echo "    WARNING    Jellyfin Desktop packages not available yet; skipped (run pitv-update later)"
+fi
+
+if command -v jellyfin-desktop > /dev/null; then
+    log_step "Configuring Jellyfin Desktop"
+    run_jellyfin_desktop() {
+        runuser -u "${TARGET_USER}" -- env HOME="${target_home}" QT_QPA_PLATFORM=offscreen \
+            jellyfin-desktop "$@"
+    }
+    if ! run_jellyfin_desktop --list-profiles 2> /dev/null | grep -qE "^${JELLYFIN_DESKTOP_PROFILE}( |$)"; then
+        run_jellyfin_desktop --create-profile "${JELLYFIN_DESKTOP_PROFILE}"
+    fi
+    profile_directory="$(grep -l "\"${JELLYFIN_DESKTOP_PROFILE}\"" \
+        "${target_home}"/.local/share/jellyfin-desktop/profiles/*/profile.json | head -n 1 | xargs dirname)"
+
+    # Only these settings are managed; the rest stays as the app saved it. With a settings file in
+    # another format version the app would start from defaults, with its own CEC control on, so
+    # such a file is replaced by one with just these settings.
+    staged_settings="$(mktemp -p "${working_directory}")"
+    python3 - "${profile_directory}/jellyfin-desktop.conf" "${staged_settings}" \
+        "$(cat "${script_directory}/jellyfin-desktop/SETTINGS_VERSION")" "${JELLYFIN_SERVER_URL}" <<'PYTHON'
+import json, shutil, sys
+settings_path, staged_path, settings_version, server_url = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+try:
+    with open(settings_path) as settings_file:
+        settings = json.load(settings_file)
+except (FileNotFoundError, json.JSONDecodeError):
+    settings = {}
+if settings.get("version") != settings_version:
+    settings = {"version": settings_version, "sections": {}}
+managed = {
+    # TV layout, fullscreen, and straight to the server: the remote can't type an address.
+    # The "tv" web mode turns every key into an app action, letters included, so nothing can be
+    # typed; "desktop" passes keys to the page, whose TV layout navigates with them itself.
+    "main": {"layout": "tv", "webMode": "desktop", "fullscreen": True, "userWebClient": server_url,
+             # The controller arrives as keyboard keys from the daemon; SDL would open the puck itself.
+             "sdlEnabled": False},
+    # The daemon owns the TV's CEC bus.
+    "cec": {"enable": False},
+}
+original = json.loads(json.dumps(settings))
+for section, values in managed.items():
+    settings["sections"].setdefault(section, {}).update(values)
+if settings == original:
+    # Already right: stage the file as it is, so it's reported unchanged and not rewritten.
+    shutil.copyfile(settings_path, staged_path)
+else:
+    with open(staged_path, "w") as staged_file:
+        json.dump(settings, staged_file, indent=4)
+        staged_file.write("\n")
+PYTHON
+    install_staged_file "${staged_settings}" "${profile_directory}/jellyfin-desktop.conf" 0644 "${TARGET_USER}"
 fi
 
 # ---------- Xorg ----------

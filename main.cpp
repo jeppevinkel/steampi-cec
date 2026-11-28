@@ -44,7 +44,7 @@ static constexpr auto LOG_UPLOAD_INTERVAL = std::chrono::seconds(60);
 static constexpr int MAXIMUM_ADAPTERS = 4;
 static constexpr int MAXIMUM_EVENTS_PER_WAIT = 8;
 static constexpr int VIRTUAL_KEYBOARD_KEY_CODES[] = {
-    KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_ENTER, KEY_BACKSPACE, KEY_HOME,
+    KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_ENTER, KEY_BACKSPACE, KEY_BACK, KEY_HOME,
 };
 
 // Shared with libcec callback threads.
@@ -52,6 +52,9 @@ static CEC::ICECAdapter* g_adapter = nullptr;
 static Logger g_log;                       // internally synchronized
 static CecEventQueue g_cecEventQueue;
 static std::atomic<uint16_t> g_ownPhysicalAddress{CEC_INVALID_PHYSICAL_ADDRESS};
+// The key the remote's Return sends: Backspace for Flex Launcher, or what the running app wants.
+// Set on the main thread when an app starts or ends, read on libcec's thread.
+static std::atomic<int> g_backKeyCode{KEY_BACKSPACE};
 // Created before libcec starts and reset after it's closed, so libcec's thread can always use it.
 static std::unique_ptr<VirtualKeyboard> g_virtualKeyboard;
 
@@ -131,7 +134,7 @@ static int linuxKeyForCecKey(const CEC::cec_user_control_code cecKey) {
         case CEC::CEC_USER_CONTROL_CODE_LEFT:   return KEY_LEFT;
         case CEC::CEC_USER_CONTROL_CODE_RIGHT:  return KEY_RIGHT;
         case CEC::CEC_USER_CONTROL_CODE_SELECT: return KEY_ENTER;
-        case CEC::CEC_USER_CONTROL_CODE_EXIT:   return KEY_BACKSPACE;
+        case CEC::CEC_USER_CONTROL_CODE_EXIT:   return g_backKeyCode.load();
         default:                                return KEY_RESERVED;
     }
 }
@@ -189,10 +192,10 @@ static void closeLogAndUploadRemainder(LogUploader& logUploader) {
     }
 }
 
-// Return held on the TV remote: like on the TV itself, it closes the running app.
-// Without an app, it takes the launcher back to its main menu.
-static void handleRemoteHeldReturn(std::optional<ControlServer>& controlServer) {
-    if (controlServer && controlServer->closeRunningApp("Return was held on the TV remote")) return;
+// Return held on the TV remote, or B held on the controller: like on the TV itself, it closes
+// the running app. Without an app, it takes the launcher back to its main menu.
+static void handleBackHeld(std::optional<ControlServer>& controlServer, const std::string_view reason) {
+    if (controlServer && controlServer->closeRunningApp(reason)) return;
     if (g_virtualKeyboard) g_virtualKeyboard->tap(KEY_HOME);
 }
 
@@ -322,15 +325,21 @@ int main(const int argumentCount, char* arguments[]) {
             steamControllerPuck->setLizardModeGrabbed(controllerRouter->mode() != ControllerMode::Released);
         }
     };
+    const auto applyBackKey = [&controllerRouter](const int linuxKeyCode) {
+        g_backKeyCode = linuxKeyCode;
+        if (controllerRouter) controllerRouter->setBackKeyCode(linuxKeyCode);
+    };
 
     // App launching is optional too: without it, Flex Launcher's tiles still start the apps.
     try {
         controlServer.emplace(epollFileDescriptor.get(), g_log, ControlServer::Callbacks{
-            .leaseStarted = [&applyControllerMode](const AppProfile& profile) {
+            .leaseStarted = [&applyControllerMode, &applyBackKey](const AppProfile& profile) {
                 applyControllerMode(profile.controllerMode);
+                applyBackKey(profile.backKeyCode);
             },
-            .leaseEnded = [&applyControllerMode](const AppProfile&) {
+            .leaseEnded = [&applyControllerMode, &applyBackKey](const AppProfile&) {
                 applyControllerMode(ControllerMode::Navigation);
+                applyBackKey(KEY_BACKSPACE);
             },
         });
     } catch (const std::system_error& error) {
@@ -348,7 +357,8 @@ int main(const int argumentCount, char* arguments[]) {
     // Controller support is optional: if it can't be set up, CEC and the TV remote keep working.
     try {
         controllerRouter.emplace(epollFileDescriptor.get(), powerStateMachine,
-                                 g_virtualKeyboard.get(), g_log);
+                                 g_virtualKeyboard.get(), g_log,
+                                 [&controlServer] { handleBackHeld(controlServer, "B was held on the controller"); });
         steamControllerPuck.emplace(epollFileDescriptor.get(), g_log,
             [&controllerRouter](const std::span<const uint8_t> report) {
                 controllerRouter->onReport(report);
@@ -403,7 +413,7 @@ int main(const int argumentCount, char* arguments[]) {
                 } else if (readyFileDescriptor == g_cecEventQueue.notificationFileDescriptor()) {
                     for (const CecEvent event : g_cecEventQueue.takeAll()) {
                         if (event == CecEvent::RemoteHeldReturn) {
-                            handleRemoteHeldReturn(controlServer);
+                            handleBackHeld(controlServer, "Return was held on the TV remote");
                             continue;
                         }
                         powerStateMachine.onCecEvent(event);   // main thread: safe to call libcec
