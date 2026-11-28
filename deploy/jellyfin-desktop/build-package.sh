@@ -29,6 +29,12 @@ DEBFULLNAME="steampi-cec CI" DEBEMAIL="ci@steampi.invalid" \
     dch --newversion "${PACKAGE_VERSION}" --distribution trixie --force-distribution \
     "Built from ${UPSTREAM_TAG} for the steampi TV box."
 
+# Upstream's debian/rules lags behind their other builds: they all build MpvQt from the bundled
+# submodule, which debian/rules doesn't ask for. Updates come through pitv-update, so the app's
+# own update check is off.
+sed -i 's/-DCHECK_FOR_UPDATES=ON/-DCHECK_FOR_UPDATES=OFF -DUSE_STATIC_MPVQT=ON/' debian/rules
+grep -q -- "-DUSE_STATIC_MPVQT=ON" debian/rules || { echo "debian/rules changed upstream; adjust build-package.sh" >&2; exit 1; }
+
 mk-build-deps --install --remove --tool "apt-get -y --no-install-recommends" debian/control
 DEB_BUILD_OPTIONS="noddebs parallel=$(nproc)" dpkg-buildpackage -us -uc -b
 
