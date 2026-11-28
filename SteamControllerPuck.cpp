@@ -39,6 +39,8 @@ constexpr auto FIRST_RETRY_DELAY = std::chrono::milliseconds(500);
 constexpr auto LONGEST_RETRY_DELAY = std::chrono::milliseconds(30'000);
 // Without udev: how often to look for the puck.
 constexpr auto RESCAN_INTERVAL = std::chrono::milliseconds(5'000);
+// How long the device state must stay unchanged before it's logged.
+constexpr auto STATE_LOG_DELAY = std::chrono::milliseconds(300);
 // Exists while udevd runs; without it, a udev monitor never receives anything.
 constexpr const char* UDEV_CONTROL_SOCKET = "/run/udev/control";
 
@@ -97,10 +99,15 @@ SteamControllerPuck::SteamControllerPuck(const int epollFileDescriptor, Logger& 
       reportHandler_(std::move(reportHandler)),
       deviceDirectories_(std::move(deviceDirectories)),
       retryTimerFileDescriptor_(timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC)),
-      retryDelay_(FIRST_RETRY_DELAY) {
+      retryDelay_(FIRST_RETRY_DELAY),
+      stateLogTimerFileDescriptor_(timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC)) {
     if (!retryTimerFileDescriptor_.isValid()
         || !watchForInput(epollFileDescriptor_, retryTimerFileDescriptor_.get())) {
         throw std::system_error(errno, std::generic_category(), "puck retry timer");
+    }
+    if (!stateLogTimerFileDescriptor_.isValid()
+        || !watchForInput(epollFileDescriptor_, stateLogTimerFileDescriptor_.get())) {
+        throw std::system_error(errno, std::generic_category(), "puck state log timer");
     }
     // Monitor first, then look: a puck plugged in between the two is still seen.
     if (!startUdevMonitor()) {
@@ -146,6 +153,10 @@ bool SteamControllerPuck::handleReadyFileDescriptor(const int readyFileDescripto
         if (consumeTimerExpiration(readyFileDescriptor)) refresh();
         return true;
     }
+    if (readyFileDescriptor == stateLogTimerFileDescriptor_.get()) {
+        if (consumeTimerExpiration(readyFileDescriptor)) logStateIfChanged();
+        return true;
+    }
     if (udevMonitor_ && readyFileDescriptor == udev_monitor_get_fd(udevMonitor_.get())) {
         handleUdevEvents();
         return true;
@@ -165,7 +176,7 @@ void SteamControllerPuck::setLizardModeGrabbed(const bool grabbed) {
     lizardModeGrabbed_ = grabbed;
     if (!grabbed) {
         grabbedInputs_.clear();   // closing the files releases the grabs
-        logStateIfChanged();
+        scheduleStateLog();
         return;
     }
     // The app may still hold its own grab for a moment after exiting; refresh retries that.
@@ -187,7 +198,7 @@ void SteamControllerPuck::handleUdevEvents() {
 void SteamControllerPuck::refresh() {
     int failureCount = openNewSlotInterfaces();
     if (lizardModeGrabbed_) failureCount += grabNewLizardModeInputs();
-    logStateIfChanged();
+    scheduleStateLog();
 
     if (failureCount > 0) {
         failureStreakLogged_ = true;
@@ -280,7 +291,7 @@ void SteamControllerPuck::closeDevice(const std::filesystem::path& devicePath) {
     std::erase_if(grabbedInputs_, [&devicePath](const OpenDevice& grabbedInput) {
         return grabbedInput.devicePath == devicePath;
     });
-    logStateIfChanged();
+    scheduleStateLog();
 }
 
 void SteamControllerPuck::closeSlotInterface(const int slotFileDescriptor, const char* reason) {
@@ -291,7 +302,7 @@ void SteamControllerPuck::closeSlotInterface(const int slotFileDescriptor, const
     log_.log("Steam Controller puck: {} closed ({})", slotInterface->devicePath.string(), reason);
     stopWatching(epollFileDescriptor_, slotFileDescriptor);
     slotInterfaces_.erase(slotInterface);
-    logStateIfChanged();
+    scheduleStateLog();
     // Unplugged: the next refresh finds nothing and that's that. Anything else: it reopens.
     scheduleRetry();
 }
@@ -317,6 +328,13 @@ void SteamControllerPuck::scheduleRetry() {
     if (!udevMonitor_) return;   // the periodic check is running anyway
     armTimer(retryTimerFileDescriptor_.get(), retryDelay_);
     retryDelay_ = std::min(retryDelay_ * 2, LONGEST_RETRY_DELAY);
+}
+
+void SteamControllerPuck::scheduleStateLog() {
+    // Re-arming moves the deadline: the state is logged STATE_LOG_DELAY after the last change.
+    if (loggedState_ != std::pair{slotInterfaces_.size(), grabbedInputs_.size()}) {
+        armTimer(stateLogTimerFileDescriptor_.get(), STATE_LOG_DELAY);
+    }
 }
 
 void SteamControllerPuck::logStateIfChanged() {

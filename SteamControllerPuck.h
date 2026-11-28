@@ -76,6 +76,9 @@ private:
     void closeSlotInterface(int slotFileDescriptor, const char* reason);
     void readReports(int slotFileDescriptor);
     void scheduleRetry();
+    // Plugging or unplugging the puck changes a dozen devices within about a second: log the
+    // state once it has stopped changing, not every step along the way.
+    void scheduleStateLog();
     void logStateIfChanged();
 
     int epollFileDescriptor_;
@@ -89,6 +92,7 @@ private:
     // With udev: one-shot retries after failures. Without udev: the periodic check.
     FileDescriptor retryTimerFileDescriptor_;
     std::chrono::milliseconds retryDelay_;
+    FileDescriptor stateLogTimerFileDescriptor_;
     bool lizardModeGrabbed_ = true;
     bool failureStreakLogged_ = false;   // a run of failures is logged once, not on every retry
     std::optional<std::pair<std::size_t, std::size_t>> loggedState_;   // slot interfaces, grabbed inputs
