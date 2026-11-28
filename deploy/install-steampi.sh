@@ -201,7 +201,9 @@ if settings.get("version") != settings_version:
     settings = {"version": settings_version, "sections": {}}
 managed = {
     # TV layout, fullscreen, and straight to the server: the remote can't type an address.
-    "main": {"layout": "tv", "webMode": "tv", "fullscreen": True, "userWebClient": server_url,
+    # The "tv" web mode turns every key into an app action, letters included, so nothing can be
+    # typed; "desktop" passes keys to the page, whose TV layout navigates with them itself.
+    "main": {"layout": "tv", "webMode": "desktop", "fullscreen": True, "userWebClient": server_url,
              # The controller arrives as keyboard keys from the daemon; SDL would open the puck itself.
              "sdlEnabled": False},
     # The daemon owns the TV's CEC bus.

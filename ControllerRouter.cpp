@@ -21,7 +21,9 @@ constexpr auto REPEAT_INTERVAL = std::chrono::milliseconds(100);
 // it turned off, so held buttons from before are meaningless.
 constexpr auto CONTROLLER_SILENCE_LIMIT = std::chrono::milliseconds(500);
 
-int linuxKeyForControllerButton(const ControllerButton button) {
+}  // namespace
+
+int ControllerRouter::linuxKeyForControllerButton(const ControllerButton button) const {
     switch (button) {
         case ControllerButton::DPadUp:
         case ControllerButton::StickUp:    return KEY_UP;
@@ -32,10 +34,12 @@ int linuxKeyForControllerButton(const ControllerButton button) {
         case ControllerButton::DPadRight:
         case ControllerButton::StickRight: return KEY_RIGHT;
         case ControllerButton::A:          return KEY_ENTER;
-        case ControllerButton::B:          return KEY_BACKSPACE;
+        case ControllerButton::B:          return backKeyCode_;
         default:                           return KEY_RESERVED;
     }
 }
+
+namespace {
 
 bool isDirection(const ControllerButton button) {
     switch (button) {
