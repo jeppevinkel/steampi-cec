@@ -71,7 +71,7 @@ SupplementaryGroups=video input
 WorkingDirectory=/home/${SERVICE_USER}
 ExecStart=${INSTALL_PATH}
 Restart=on-failure
-# Long enough that a crash loop doesn't post a log chunk to ntfy every few seconds.
+# Long enough that a crash loop doesn't spin. The crashed run's log is kept in ~/cec.log.previous.
 RestartSec=30
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/home/${SERVICE_USER}/.Xauthority
@@ -116,8 +116,10 @@ if [[ ${unit_changed} == true ]]; then
 fi
 
 systemctl enable --quiet "${SERVICE_NAME}"
-echo "Restarting ${SERVICE_NAME} (may take a moment while the final log upload finishes)..."
+echo "Restarting ${SERVICE_NAME}..."
 systemctl restart "${SERVICE_NAME}"
+# Left over from when the daemon uploaded its log to ntfy.
+rm -f "/home/${SERVICE_USER}/cec-upload-chunk.log"
 
 # ---------- Check it came up ----------
 sleep 3
