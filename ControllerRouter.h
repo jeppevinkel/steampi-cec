@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <linux/input-event-codes.h>
@@ -25,13 +26,14 @@
 class ControllerRouter {
 public:
     // virtualKeyboard may be null (uinput unavailable): waking still works, keys are skipped.
-    // Throws std::system_error if the repeat timer can't be created.
+    // backHeld runs when B is held in Navigation mode, like Return held on the TV remote.
+    // Throws std::system_error if a timer can't be created.
     ControllerRouter(int epollFileDescriptor, PowerStateMachine& powerStateMachine,
-                     VirtualKeyboard* virtualKeyboard, Logger& log);
+                     VirtualKeyboard* virtualKeyboard, Logger& log, std::function<void()> backHeld);
 
     void onReport(std::span<const uint8_t> report);
 
-    // Returns true if the file descriptor was the repeat timer (and was handled).
+    // Returns true if the file descriptor was one of the router's timers (and was handled).
     bool handleReadyFileDescriptor(int readyFileDescriptor);
 
     void setMode(ControllerMode mode);
@@ -45,6 +47,7 @@ private:
     void onNavigationButtonPressed(ControllerButton button);
     void startRepeating(ControllerButton button, int linuxKeyCode);
     void stopRepeating();
+    void cancelBackHold();
 
     PowerStateMachine& powerStateMachine_;
     VirtualKeyboard* virtualKeyboard_;
@@ -52,6 +55,9 @@ private:
     ControllerMode mode_ = ControllerMode::Navigation;
     SteamControllerDecoder decoder_;
     FileDescriptor repeatTimerFileDescriptor_;
+    std::function<void()> backHeld_;
+    FileDescriptor backHoldTimerFileDescriptor_;
+    bool isTimingBackHold_ = false;
     std::optional<ControllerButton> repeatingButton_;
     int repeatingKeyCode_ = 0;
     int backKeyCode_ = KEY_BACKSPACE;

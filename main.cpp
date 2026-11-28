@@ -192,10 +192,10 @@ static void closeLogAndUploadRemainder(LogUploader& logUploader) {
     }
 }
 
-// Return held on the TV remote: like on the TV itself, it closes the running app.
-// Without an app, it takes the launcher back to its main menu.
-static void handleRemoteHeldReturn(std::optional<ControlServer>& controlServer) {
-    if (controlServer && controlServer->closeRunningApp("Return was held on the TV remote")) return;
+// Return held on the TV remote, or B held on the controller: like on the TV itself, it closes
+// the running app. Without an app, it takes the launcher back to its main menu.
+static void handleBackHeld(std::optional<ControlServer>& controlServer, const std::string_view reason) {
+    if (controlServer && controlServer->closeRunningApp(reason)) return;
     if (g_virtualKeyboard) g_virtualKeyboard->tap(KEY_HOME);
 }
 
@@ -357,7 +357,8 @@ int main(const int argumentCount, char* arguments[]) {
     // Controller support is optional: if it can't be set up, CEC and the TV remote keep working.
     try {
         controllerRouter.emplace(epollFileDescriptor.get(), powerStateMachine,
-                                 g_virtualKeyboard.get(), g_log);
+                                 g_virtualKeyboard.get(), g_log,
+                                 [&controlServer] { handleBackHeld(controlServer, "B was held on the controller"); });
         steamControllerPuck.emplace(epollFileDescriptor.get(), g_log,
             [&controllerRouter](const std::span<const uint8_t> report) {
                 controllerRouter->onReport(report);
@@ -412,7 +413,7 @@ int main(const int argumentCount, char* arguments[]) {
                 } else if (readyFileDescriptor == g_cecEventQueue.notificationFileDescriptor()) {
                     for (const CecEvent event : g_cecEventQueue.takeAll()) {
                         if (event == CecEvent::RemoteHeldReturn) {
-                            handleRemoteHeldReturn(controlServer);
+                            handleBackHeld(controlServer, "Return was held on the TV remote");
                             continue;
                         }
                         powerStateMachine.onCecEvent(event);   // main thread: safe to call libcec

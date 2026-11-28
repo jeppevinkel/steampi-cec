@@ -20,6 +20,8 @@ constexpr auto REPEAT_INTERVAL = std::chrono::milliseconds(100);
 // The controller sends ~60 reports per second while on. Silence longer than this means
 // it turned off, so held buttons from before are meaningless.
 constexpr auto CONTROLLER_SILENCE_LIMIT = std::chrono::milliseconds(500);
+// Holding B this long does what holding Return on the TV remote does: close the running app.
+constexpr auto BACK_HOLD_DURATION = std::chrono::milliseconds(1000);
 
 }  // namespace
 
@@ -83,14 +85,21 @@ const char* controllerButtonName(const ControllerButton button) {
 ControllerRouter::ControllerRouter(const int epollFileDescriptor,
                                            PowerStateMachine& powerStateMachine,
                                            VirtualKeyboard* virtualKeyboard,
-                                           Logger& log)
+                                           Logger& log,
+                                           std::function<void()> backHeld)
     : powerStateMachine_(powerStateMachine),
       virtualKeyboard_(virtualKeyboard),
       log_(log),
-      repeatTimerFileDescriptor_(timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC)) {
+      repeatTimerFileDescriptor_(timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC)),
+      backHeld_(std::move(backHeld)),
+      backHoldTimerFileDescriptor_(timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC)) {
     if (!repeatTimerFileDescriptor_.isValid()
         || !watchForInput(epollFileDescriptor, repeatTimerFileDescriptor_.get())) {
         throw std::system_error(errno, std::generic_category(), "controller repeat timer");
+    }
+    if (!backHoldTimerFileDescriptor_.isValid()
+        || !watchForInput(epollFileDescriptor, backHoldTimerFileDescriptor_.get())) {
+        throw std::system_error(errno, std::generic_category(), "controller back hold timer");
     }
 }
 
@@ -105,6 +114,7 @@ void ControllerRouter::onReport(const std::span<const uint8_t> report) {
         // it back from another input. The press that turned it on may never appear in a report.
         decoder_.reset();
         stopRepeating();
+        cancelBackHold();
         log_.write("Controller: turned on");
         powerStateMachine_.onControllerButtonPressed(/*isTakeOverButton=*/false);
     }
@@ -116,6 +126,9 @@ void ControllerRouter::onReport(const std::span<const uint8_t> report) {
                       [this](const ControllerButton button) { onNavigationButtonPressed(button); });
         if (repeatingButton_ && !(decoder_.pressedButtons() & buttonBit(*repeatingButton_))) {
             stopRepeating();
+        }
+        if (isTimingBackHold_ && !(decoder_.pressedButtons() & buttonBit(ControllerButton::B))) {
+            cancelBackHold();   // let go before the hold counted
         }
         return;
     }
@@ -131,6 +144,7 @@ void ControllerRouter::setMode(const ControllerMode mode) {
     if (mode == mode_) return;
 
     stopRepeating();
+    cancelBackHold();
     decoder_.reset();   // held buttons from the previous mode mean nothing in the new one
     mode_ = mode;
     log_.log("Controller: mode {}", controllerModeName(mode_));
@@ -143,6 +157,12 @@ void ControllerRouter::onNavigationButtonPressed(const ControllerButton button) 
         return;
     }
 
+    if (button == ControllerButton::B) {
+        // Timed even without a virtual keyboard: closing the app doesn't need one.
+        isTimingBackHold_ = true;
+        armTimer(backHoldTimerFileDescriptor_.get(), BACK_HOLD_DURATION);
+    }
+
     const int linuxKeyCode = linuxKeyForControllerButton(button);
     if (linuxKeyCode == KEY_RESERVED || !virtualKeyboard_) return;
 
@@ -152,6 +172,15 @@ void ControllerRouter::onNavigationButtonPressed(const ControllerButton button) 
 }
 
 bool ControllerRouter::handleReadyFileDescriptor(const int readyFileDescriptor) {
+    if (readyFileDescriptor == backHoldTimerFileDescriptor_.get()) {
+        if (!consumeTimerExpiration(readyFileDescriptor) || !isTimingBackHold_) return true;
+        isTimingBackHold_ = false;
+        // Reports stopped while B was down (controller turned off): that's not a hold.
+        if (std::chrono::steady_clock::now() - lastReportTime_ > CONTROLLER_SILENCE_LIMIT) return true;
+        log_.write("Controller: B held");
+        if (backHeld_) backHeld_();
+        return true;
+    }
     if (readyFileDescriptor != repeatTimerFileDescriptor_.get()) return false;
     if (!consumeTimerExpiration(readyFileDescriptor) || !repeatingButton_) return true;
 
@@ -173,4 +202,9 @@ void ControllerRouter::startRepeating(const ControllerButton button, const int l
 void ControllerRouter::stopRepeating() {
     repeatingButton_.reset();
     disarmTimer(repeatTimerFileDescriptor_.get());
+}
+
+void ControllerRouter::cancelBackHold() {
+    isTimingBackHold_ = false;
+    disarmTimer(backHoldTimerFileDescriptor_.get());
 }
