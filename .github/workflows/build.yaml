@@ -20,25 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # The build runs in Debian trixie, the same as Raspberry Pi OS on the Pi. Registries
-      # sometimes refuse anonymous pulls ("Data limit exceeded"), so several are tried in turn
-      # instead of letting one failed download fail the build.
+      # Debian trixie, the same as Raspberry Pi OS on the Pi; tries several registries.
       - name: Get a Debian trixie image
-        run: |
-          for image in public.ecr.aws/docker/library/debian:trixie \
-                       mirror.gcr.io/library/debian:trixie \
-                       docker.io/library/debian:trixie; do
-            for attempt in 1 2; do
-              if docker pull --quiet "$image"; then
-                echo "BUILD_IMAGE=$image" >> "$GITHUB_ENV"
-                exit 0
-              fi
-              echo "::warning::Pulling $image failed (attempt $attempt)"
-              sleep 10
-            done
-          done
-          echo "::error::No registry could provide debian:trixie"
-          exit 1
+        run: .github/scripts/pull-debian-image.sh
 
       - name: Build
         run: |

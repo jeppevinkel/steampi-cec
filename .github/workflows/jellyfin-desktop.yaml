@@ -1,0 +1,30 @@
+name: Jellyfin Desktop
+# Builds the Jellyfin Desktop client as a Debian package for the Pi (arm64, trixie). Upstream
+# publishes no ARM Linux build. Runs when the recipe or the pinned version changes, or on demand.
+on:
+  push:
+    paths:
+      - deploy/jellyfin-desktop/**
+      - .github/workflows/jellyfin-desktop.yaml
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Get a Debian trixie image
+        run: .github/scripts/pull-debian-image.sh
+
+      - name: Build the package
+        run: |
+          mkdir -p packages
+          docker run --rm -v "$PWD/deploy/jellyfin-desktop:/recipe:ro" -v "$PWD/packages:/output" \
+              -e HOST_IDS="$(id -u):$(id -g)" "$BUILD_IMAGE" \
+              bash -euo pipefail -c '/recipe/build-package.sh /output; chown -R "$HOST_IDS" /output'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jellyfin-desktop-arm64
+          path: packages/*.deb
