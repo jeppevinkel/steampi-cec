@@ -15,7 +15,8 @@ readonly OUTPUT_DIRECTORY="$1"
 readonly SOURCE_DIRECTORY=/tmp/jellyfin-desktop
 # v2.1.0-pre2 -> 2.1.0~pre2: "~" sorts a pre-release before the final release.
 readonly UPSTREAM_VERSION="${UPSTREAM_TAG#v}"
-readonly PACKAGE_VERSION="${UPSTREAM_VERSION//-/\~}-1+steampi1"
+# Bump the steampi number when the patches below change, so apt installs the new build.
+readonly PACKAGE_VERSION="${UPSTREAM_VERSION//-/\~}-1+steampi2"
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -45,6 +46,14 @@ DEBFULLNAME="steampi-cec CI" DEBEMAIL="ci@steampi.invalid" \
 # own update check is off.
 sed -i 's/-DCHECK_FOR_UPDATES=ON/-DCHECK_FOR_UPDATES=OFF -DUSE_STATIC_MPVQT=ON/' debian/rules
 grep -q -- "-DUSE_STATIC_MPVQT=ON" debian/rules || { echo "debian/rules changed upstream; adjust build-package.sh" >&2; exit 1; }
+
+# The bundled start page went to the server with "window.location = ...", which leaves the start page
+# in the history. The web client decides whether "back" can go further by the history's length, so
+# Back on its home page went to the start page, which reconnects and reloads everything. Replacing
+# the start page instead means there's nothing before the home page.
+sed -i 's/window\.location = resolvedUrl;/window.location.replace(resolvedUrl);/' native/find-webclient.js
+grep -q "window.location.replace(resolvedUrl);" native/find-webclient.js \
+    || { echo "native/find-webclient.js changed upstream; adjust build-package.sh" >&2; exit 1; }
 
 mk-build-deps --install --remove --tool "apt-get -y --no-install-recommends" debian/control
 DEB_BUILD_OPTIONS="noddebs parallel=$(nproc)" dpkg-buildpackage -us -uc -b
