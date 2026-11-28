@@ -37,6 +37,7 @@ ping -q -c "${PING_COUNT}" -i 0.2 "${router_address}" | tail -n 2
 
 section "Steam Link streaming quality (latest lines from the daemon log)"
 # qual = share of packets that arrived; CaptureFailed = the PC couldn't capture the game (black
-# screen without any network problem); the session summary gives frame loss for the whole stream.
-grep -E 'Lease (started|ended): steamlink|\[steamlink\].*(qual|CaptureFailed|Session state|session complete|Video size)' \
+# screen without any network problem); the session summary gives frame loss for the whole stream;
+# the exit code shows whether Steam Link crashed on the way out (139).
+grep -E 'Lease (started|ended): steamlink|steamlink exited with code|\[steamlink\].*(qual|CaptureFailed|Session state|session complete|Video size)' \
     /home/jeppe/cec.log | tail -n 60

@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBCEC REQUIRED IMPORTED_TARGET libcec)
+pkg_check_modules(LIBUDEV REQUIRED IMPORTED_TARGET libudev)
 
 add_executable(steampi_cec main.cpp
         Logger.cpp
@@ -38,4 +39,4 @@ add_executable(steampi_cec main.cpp
         AppLaunchClient.h)
 
 target_compile_options(steampi_cec PRIVATE -Wall -Wextra -Wpedantic)
-target_link_libraries(steampi_cec PRIVATE PkgConfig::LIBCEC)
+target_link_libraries(steampi_cec PRIVATE PkgConfig::LIBCEC PkgConfig::LIBUDEV)
