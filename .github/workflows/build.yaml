@@ -6,7 +6,6 @@ on:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
-    container: public.ecr.aws/docker/library/debian:trixie
     strategy:
       fail-fast: false
       matrix:
@@ -20,21 +19,48 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - run: apt-get update && apt-get install -y g++ cmake ninja-build pkg-config libcec-dev libp8-platform-dev libudev-dev
-      - run: |
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build
-      - run: cp build/steampi_cec steampi-cec-${{ matrix.arch }}
+
+      # The build runs in Debian trixie, the same as Raspberry Pi OS on the Pi. Registries
+      # sometimes refuse anonymous pulls ("Data limit exceeded"), so several are tried in turn
+      # instead of letting one failed download fail the build.
+      - name: Get a Debian trixie image
+        run: |
+          for image in public.ecr.aws/docker/library/debian:trixie \
+                       mirror.gcr.io/library/debian:trixie \
+                       docker.io/library/debian:trixie; do
+            for attempt in 1 2; do
+              if docker pull --quiet "$image"; then
+                echo "BUILD_IMAGE=$image" >> "$GITHUB_ENV"
+                exit 0
+              fi
+              echo "::warning::Pulling $image failed (attempt $attempt)"
+              sleep 10
+            done
+          done
+          echo "::error::No registry could provide debian:trixie"
+          exit 1
+
+      - name: Build
+        run: |
+          docker run --rm -v "$PWD:/source" -w /source -e HOST_IDS="$(id -u):$(id -g)" "$BUILD_IMAGE" bash -euo pipefail -c '
+            apt-get update
+            apt-get install -y g++ cmake ninja-build pkg-config libcec-dev libp8-platform-dev libudev-dev
+            cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+            cmake --build build
+            chown -R "$HOST_IDS" build   # files made in the container belong to root otherwise
+          '
+          cp build/steampi_cec steampi-cec-${{ matrix.arch }}
+
       - uses: actions/upload-artifact@v7
         with:
           path: steampi-cec-${{ matrix.arch }}
           archive: false
+
       - name: Publish to rolling release
         if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          apt-get install -y gh
           gh release view nightly --repo "${{ github.repository }}" >/dev/null 2>&1 \
             || gh release create nightly --repo "${{ github.repository }}" \
                  --title "Nightly" --notes "Latest build" --prerelease \
