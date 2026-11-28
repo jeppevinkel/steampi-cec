@@ -9,7 +9,8 @@ set -euo pipefail
 
 SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UPSTREAM_TAG="$(cat "${SCRIPT_DIRECTORY}/VERSION")"
-readonly SCRIPT_DIRECTORY UPSTREAM_TAG
+EXPECTED_SETTINGS_VERSION="$(cat "${SCRIPT_DIRECTORY}/SETTINGS_VERSION")"
+readonly SCRIPT_DIRECTORY UPSTREAM_TAG EXPECTED_SETTINGS_VERSION
 readonly OUTPUT_DIRECTORY="$1"
 readonly SOURCE_DIRECTORY=/tmp/jellyfin-desktop
 # v2.1.0-pre2 -> 2.1.0~pre2: "~" sorts a pre-release before the final release.
@@ -23,6 +24,16 @@ apt-get install -y --no-install-recommends ca-certificates git devscripts equivs
 git clone --quiet --depth 1 --branch "${UPSTREAM_TAG}" --recurse-submodules --shallow-submodules \
     https://github.com/jellyfin/jellyfin-desktop.git "${SOURCE_DIRECTORY}"
 cd "${SOURCE_DIRECTORY}"
+
+# install-steampi.sh writes the app's settings file in this format version. On a mismatch the app
+# discards the file and starts from defaults, with its own CEC control on, which would fight the
+# daemon over the TV. So a new upstream version that changes the format must be reviewed first.
+settings_version="$(grep -m 1 -oE '"version": *[0-9]+' resources/settings/settings_description.json | grep -oE '[0-9]+$')"
+if [[ "${settings_version}" != "${EXPECTED_SETTINGS_VERSION}" ]]; then
+    echo "Settings format is ${settings_version}, SETTINGS_VERSION says ${EXPECTED_SETTINGS_VERSION}:" \
+         "check the settings install-steampi.sh writes, then update SETTINGS_VERSION." >&2
+    exit 1
+fi
 
 # Upstream doesn't always bump debian/changelog; our own version keeps apt upgrades in order.
 DEBFULLNAME="steampi-cec CI" DEBEMAIL="ci@steampi.invalid" \
